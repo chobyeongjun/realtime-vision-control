@@ -82,7 +82,7 @@ def print_model_comparison_table(merged):
     print("  모델 비교표 (Model Comparison Table)")
     print("=" * 140)
 
-    # 헤더
+    # 헤더 (스코어 제거, raw 메트릭만)
     headers = [
         ("모델", 28),
         ("FPS", 6),
@@ -94,15 +94,10 @@ def print_model_comparison_table(merged):
         ("하체%", 6),
         ("Conf", 5),
         ("Foot", 4),
-        ("3D CV", 6),
-        ("대칭", 5),
-        ("Score", 6),
     ]
     header_line = "  ".join(f"{h:<{w}}" if i == 0 else f"{h:>{w}}" for i, (h, w) in enumerate(headers))
     print(header_line)
-    print("-" * 140)
-
-    scores = compute_recommendation_scores(merged)
+    print("-" * 110)
 
     for name, stats in merged.items():
         fps = stats.get('avg_fps', 0)
@@ -115,15 +110,6 @@ def print_model_comparison_table(merged):
         conf = stats.get('avg_lower_limb_conf', 0)
         has_foot = "Y" if stats.get("joint_angle_stats", {}).get("left_ankle_dorsiflexion") else "N"
 
-        bone_cvs = list(stats.get("bone_length_cv", {}).values())
-        avg_cv = f"{np.mean(bone_cvs):.3f}" if bone_cvs else "-"
-
-        sym_scores = stats.get("symmetry_scores", {})
-        sym_vals = [v["mean"] for v in sym_scores.values()] if sym_scores else []
-        avg_sym = f"{np.mean(sym_vals):.3f}" if sym_vals else "-"
-
-        score = scores.get(name, 0)
-
         print(f"  {name:<28}"
               f"{fps:>6.1f}  "
               f"{infer:>7.1f}  "
@@ -133,17 +119,19 @@ def print_model_comparison_table(merged):
               f"{det:>6.1f}  "
               f"{ll:>6.1f}  "
               f"{conf:>5.2f}  "
-              f"{has_foot:>4}  "
-              f"{avg_cv:>6}  "
-              f"{avg_sym:>5}  "
-              f"{score:>6.3f}")
+              f"{has_foot:>4}")
 
-    print("-" * 140)
+    print("-" * 110)
 
-    # 추천 모델
-    if scores:
-        best = max(scores, key=scores.get)
-        print(f"\n  추천 모델: {best} (score: {scores[best]:.3f})")
+    # 요약 (스코어 없이)
+    valid = {n: s for n, s in merged.items()}
+    if valid:
+        best_fps = max(valid, key=lambda n: valid[n].get('avg_fps', 0))
+        best_e2e = min(valid, key=lambda n: valid[n].get('avg_e2e_latency_ms', float('inf')))
+        best_det = max(valid, key=lambda n: valid[n].get('lower_limb_rate', 0))
+        print(f"\n  최고 FPS:       {best_fps} ({valid[best_fps].get('avg_fps', 0):.1f})")
+        print(f"  최저 E2E:       {best_e2e} ({valid[best_e2e].get('avg_e2e_latency_ms', 0):.1f}ms)")
+        print(f"  최고 하체 인식:  {best_det} ({valid[best_det].get('lower_limb_rate', 0):.1f}%)")
 
     # 관절 각도 비교표
     print_joint_angle_table(merged)
@@ -200,7 +188,7 @@ def compute_recommendation_scores(merged):
         latency_score = max(0, (50 - e2e) / 50) if e2e < 50 else -0.3
         detect_score = ll_rate / 100.0
         foot_score = has_foot
-        fps_score = min(fps / 60.0, 1.0)
+        fps_score = min(fps / 120.0, 1.0)
 
         bone_cvs = list(stats.get("bone_length_cv", {}).values())
         stability_score = max(0, 1.0 - np.mean(bone_cvs) * 10) if bone_cvs else 0.5
@@ -361,13 +349,13 @@ def generate_html_report(merged, configs, output_path):
         charts['latency'] = generate_latency_breakdown_chart(merged)
         charts['fps'] = generate_fps_chart(merged)
         charts['detection'] = generate_detection_chart(merged)
-        charts['score'] = generate_score_chart(merged)
         charts['distribution'] = generate_latency_distribution_chart(merged)
 
-    scores = compute_recommendation_scores(merged)
-    best_model = max(scores, key=scores.get) if scores else "N/A"
+    # 최저 E2E 기준으로 best 모델 선정 (스코어 없이)
+    valid_models = {n: s for n, s in merged.items() if s.get('avg_e2e_latency_ms', 999) < 999}
+    best_model = min(valid_models, key=lambda n: valid_models[n].get('avg_e2e_latency_ms', 999)) if valid_models else "N/A"
 
-    # 모델 비교 테이블 HTML
+    # 모델 비교 테이블 HTML (스코어 제거)
     table_rows = []
     for name, stats in merged.items():
         fps = stats.get('avg_fps', 0)
@@ -379,7 +367,6 @@ def generate_html_report(merged, configs, output_path):
         ll = stats.get('lower_limb_rate', 0)
         conf = stats.get('avg_lower_limb_conf', 0)
         has_foot = stats.get("joint_angle_stats", {}).get("left_ankle_dorsiflexion")
-        score = scores.get(name, 0)
 
         is_best = ' style="background:#e8f5e9;font-weight:bold"' if name == best_model else ''
         e2e_color = '#4CAF50' if e2e < 50 else '#FF5722'
@@ -396,14 +383,12 @@ def generate_html_report(merged, configs, output_path):
             <td>{ll:.1f}%</td>
             <td>{conf:.3f}</td>
             <td>{'Yes' if has_foot else 'No'}</td>
-            <td>{score:.3f}</td>
         </tr>""")
 
     chart_imgs = ""
     for title, key in [("E2E Latency Breakdown", "latency"),
                         ("FPS Comparison", "fps"),
                         ("Detection Rate", "detection"),
-                        ("Recommendation Score", "score"),
                         ("Latency Distribution", "distribution")]:
         if charts.get(key):
             chart_imgs += f"""
@@ -443,8 +428,8 @@ def generate_html_report(merged, configs, output_path):
 </div>
 
 <div class="recommendation">
-    <strong>Recommended Model: {best_model}</strong> (Score: {scores.get(best_model, 0):.3f})
-    <br>Scoring: E2E Latency(30%) + Lower Limb Detection(25%) + 3D Stability(20%) + Foot Keypoints(15%) + FPS(10%)
+    <strong>Lowest E2E Latency: {best_model}</strong>
+    <br>Raw 메트릭(FPS, Infer, E2E, P95, Detection)으로 직접 비교하세요. 스코어링은 사용하지 않습니다.
 </div>
 
 <h2>Model Comparison Table</h2>
@@ -452,7 +437,7 @@ def generate_html_report(merged, configs, output_path):
 <tr>
     <th>Model</th><th>FPS</th><th>Infer(ms)</th><th>E2E(ms)</th><th>P95(ms)</th>
     <th>&lt;50ms</th><th>Detection</th><th>Lower Limb</th><th>Confidence</th>
-    <th>Foot KP</th><th>Score</th>
+    <th>Foot KP</th>
 </tr>
 {''.join(table_rows)}
 </table>
