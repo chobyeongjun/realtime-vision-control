@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from zed_camera import create_camera, HAS_ZED
 from pose_models import (
     MediaPipePose, YOLOv8Pose, RTMPoseModel, RTMPoseWholebody,
-    ZEDBodyTracking, PoseResult
+    ZEDBodyTracking, MoveNetModel, PoseResult
 )
 from joint_angles import compute_lower_limb_angles
 
@@ -164,6 +164,14 @@ def create_model_pairs(selected_models, include_trt=True):
         if include_trt:
             pairs.append(("YOLOv8s (TRT)", YOLOv8Pose(model_size="s", use_tensorrt=True)))
 
+    if "yolo11" in selected_models or "all" in selected_models:
+        pairs.append(("YOLO11n", YOLOv8Pose(model_size="n", use_tensorrt=False, yolo_version="v11")))
+        if include_trt:
+            pairs.append(("YOLO11n (TRT)", YOLOv8Pose(model_size="n", use_tensorrt=True, yolo_version="v11")))
+        pairs.append(("YOLO11s", YOLOv8Pose(model_size="s", use_tensorrt=False, yolo_version="v11")))
+        if include_trt:
+            pairs.append(("YOLO11s (TRT)", YOLOv8Pose(model_size="s", use_tensorrt=True, yolo_version="v11")))
+
     if "rtmpose" in selected_models or "all" in selected_models:
         pairs.append(("RTMPose-bal", RTMPoseModel(mode="balanced", use_tensorrt=False)))
         if include_trt:
@@ -179,6 +187,14 @@ def create_model_pairs(selected_models, include_trt=True):
         pairs.append(("RTMPose-WB-lite", RTMPoseWholebody(mode="lightweight", use_tensorrt=False)))
         if include_trt:
             pairs.append(("RTMPose-WB-lite (TRT)", RTMPoseWholebody(mode="lightweight", use_tensorrt=True)))
+
+    if "movenet" in selected_models or "all" in selected_models:
+        pairs.append(("MoveNet-Lightning", MoveNetModel(variant="lightning", use_tensorrt=False)))
+        if include_trt:
+            pairs.append(("MoveNet-Lightning (TRT)", MoveNetModel(variant="lightning", use_tensorrt=True)))
+        pairs.append(("MoveNet-Thunder", MoveNetModel(variant="thunder", use_tensorrt=False)))
+        if include_trt:
+            pairs.append(("MoveNet-Thunder (TRT)", MoveNetModel(variant="thunder", use_tensorrt=True)))
 
     if ("zed_bt" in selected_models or "all" in selected_models) and HAS_ZED:
         pairs.append(("ZED BT (FAST)", ZEDBodyTracking(model="FAST")))
@@ -276,7 +292,8 @@ def main():
     parser = argparse.ArgumentParser(description="PyTorch vs TensorRT 비교 벤치마크")
     parser.add_argument("--models", nargs="+",
                         default=["all"],
-                        choices=["all", "mediapipe", "yolov8", "rtmpose", "rtmpose_wb", "zed_bt"],
+                        choices=["all", "mediapipe", "yolov8", "yolo11", "rtmpose", "rtmpose_wb",
+                                 "movenet", "zed_bt"],
                         help="비교할 모델 선택")
     parser.add_argument("--duration", type=int, default=15,
                         help="모델당 측정 시간 (초)")
@@ -284,7 +301,7 @@ def main():
                         help="ZED 카메라 대신 웹캠 사용")
     parser.add_argument("--resolution", default="SVGA",
                         choices=["SVGA", "VGA", "HD720", "HD1080", "HD1200"])
-    parser.add_argument("--camera-fps", type=int, default=60,
+    parser.add_argument("--camera-fps", type=int, default=120,
                         help="카메라 FPS (ZED X Mini: 60 or 120)")
     parser.add_argument("--video", type=str, default=None,
                         help="동영상 파일 경로 (SVO2/MP4)")
@@ -294,8 +311,25 @@ def main():
                         help="TensorRT 비교 건너뛰기 (기본 모드만)")
     parser.add_argument("--trt-only", action="store_true",
                         help="TensorRT 모델만 실행")
+    parser.add_argument("--max-perf", action="store_true",
+                        help="Jetson 최대 성능 모드 (MAXN, jetson_clocks, fan max)")
 
     args = parser.parse_args()
+
+    # --max-perf: Jetson 시스템 최적화
+    jetson_optimized = False
+    if args.max_perf:
+        try:
+            from jetson_optimizer import optimize_jetson, get_system_info
+            print()
+            optimize_jetson()
+            sys_info = get_system_info()
+            jetson_optimized = True
+        except Exception as e:
+            print(f"  [WARNING] Jetson 최적화 실패 (sudo 필요?): {e}")
+    else:
+        print("\n  [INFO] --max-perf 미사용: GPU 클럭이 동적 조절되어 결과가 불안정할 수 있습니다.")
+        print(f"  [INFO] 정확한 벤치마크를 위해 --max-perf 사용을 권장합니다.\n")
 
     print("=" * 60)
     print("  PyTorch vs TensorRT 비교 벤치마크")
@@ -377,11 +411,13 @@ def main():
     # 비교 테이블
     print_comparison_table(all_results)
 
-    # 결과 저장
+    # 결과 저장 — results/trt_comparison/YYYYMMDD_HHMMSS/
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"trt_comparison_{timestamp}.json")
+    run_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "results", "trt_comparison", timestamp)
+    os.makedirs(run_dir, exist_ok=True)
+    output_path = os.path.join(run_dir, "results.json")
 
     save_data = {
         "timestamp": timestamp,
@@ -392,6 +428,7 @@ def main():
             "camera_fps": args.camera_fps,
             "video": args.video,
             "trt_enabled": include_trt,
+            "max_perf": jetson_optimized,
         },
         "results": {},
     }
@@ -415,6 +452,15 @@ def main():
     print(f"  결과 저장: {output_path}")
 
     camera.close()
+
+    # Jetson 설정 복원
+    if jetson_optimized:
+        try:
+            from jetson_optimizer import restore_jetson
+            restore_jetson()
+        except Exception as e:
+            print(f"  [WARNING] Jetson 설정 복원 실패: {e}")
+
     print("\n완료!")
 
 

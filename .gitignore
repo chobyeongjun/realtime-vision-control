@@ -2,6 +2,14 @@
 *.onnx
 *.pt
 *.trt
+*.cache
+*.so
+*.o
 __pycache__/
 venv/
 models/
+trt_cache/
+int8_calib_cache/
+calib_images/
+build/
+*.egg-info/

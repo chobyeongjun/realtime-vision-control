@@ -1,0 +1,39 @@
+# H-Walker Pose Estimation Benchmark - Python Dependencies
+# =========================================================
+# For Jetson Orin NX, use benchmarks/setup_jetson.sh instead,
+# which handles CUDA-specific builds (PyTorch, ONNX Runtime GPU).
+#
+# For non-Jetson platforms (development/testing):
+#   pip install -r requirements.txt
+
+# Core
+# ⚠ numpy 2.x 주의: ultralytics>=8.4가 numpy 2.x를 설치합니다.
+#   시스템 matplotlib(apt)이 numpy 1.x용이라 충돌 → pip install matplotlib으로 해결
+#   또는 subprocess에서 /usr/lib/python3/dist-packages 경로를 제거 (pose_models.py에 적용됨)
+numpy>=1.23.2
+opencv-python>=4.6.0
+matplotlib>=3.5.0
+pandas>=1.4.0
+
+# Pose estimation models
+mediapipe>=0.10.0
+ultralytics>=8.0.0
+rtmlib>=0.0.10
+
+# ONNX Runtime
+# ⚠ 주의: 기본 onnxruntime은 CPU 전용입니다!
+# Jetson에서 RTMPose GPU 추론을 사용하려면 반드시 onnxruntime-gpu Jetson 빌드가 필요합니다.
+# CPU 버전으로는 RTMPose가 GPU를 사용할 수 없어 10배 이상 느려집니다.
+#
+# [Jetson 설치 (필수)]
+#   pip uninstall onnxruntime onnxruntime-gpu -y
+#   pip install onnxruntime-gpu --index-url https://pypi.jetson-ai-lab.io/jp6/cu126 --no-cache-dir
+#
+# [비-Jetson 개발/테스트용]
+#   pip install onnxruntime-gpu  (일반 PyPI)
+#
+# 아래는 비-Jetson 플랫폼 fallback용입니다. Jetson에서는 setup_jetson.sh를 사용하세요.
+onnxruntime>=1.14.0
+
+# MoveNet (TFLite; on Jetson aarch64 use: pip install tflite-runtime)
+tflite-runtime>=2.14.0
