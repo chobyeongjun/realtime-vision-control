@@ -5,6 +5,61 @@
 
 ---
 
+## [2026-03-24] 벤치마크 실행 결과 분석 (12개 모델 성공, 3개 에러)
+
+**브랜치**: `claude/analyze-project-results-FjIrj`
+
+### 벤치마크 환경
+- Jetson Orin NX 16GB + ZED X Mini (SVGA@120fps, Global Shutter)
+- 측정 시간: 각 모델 15초
+- Depth: ON
+
+### 성공 모델 결과 요약 (E2E Latency 순)
+
+| 모델 | FPS | Infer(ms) | E2E(ms) | P95 E2E | <50ms% | 인식률 | Conf | Foot |
+|------|-----|-----------|---------|---------|--------|--------|------|------|
+| YOLOv8n-Pose | 27.7 | 27.4 | 35.7 | 38.2 | 100% | 100% | 0.97 | No |
+| YOLOv8s-Pose | 25.1 | 32.4 | 39.5 | 43.4 | 100% | 100% | 0.99 | No |
+| YOLO11s-Pose | 24.5 | 33.1 | 40.4 | 43.2 | 99.7% | 100% | 0.99 | No |
+| YOLO11n-Pose | 23.8 | 32.7 | 41.6 | 44.7 | 100% | 100% | 0.99 | No |
+| YOLO26n-Pose | 22.4 | 35.3 | 44.2 | 46.5 | 100% | 100% | 0.97 | No |
+| YOLO26s-Pose | 22.3 | 36.9 | 44.4 | 47.5 | 99.4% | 100% | 0.99 | No |
+| MediaPipe (c=0) | 15.5 | 46.6 | 63.6 | 71.1 | 0% | 94.4% | 0.77 | Yes |
+| MediaPipe (c=1) | 12.5 | 62.4 | 79.3 | 125.2 | 1.6% | 52.9% | 0.59 | Yes |
+| RTMPose (lightweight) | 6.6 | 132.8 | 150.5 | 177.7 | 0% | 100% | 0.60 | No |
+| RTMPose Wholebody (lw) | 4.1 | 228.2 | 245.6 | 292.4 | 0% | 100% | 0.68 | Yes |
+| RTMPose (balanced) | 1.4 | 709.9 | 726.9 | 772.3 | 0% | 100% | 0.61 | No |
+| RTMPose Wholebody (bal) | 1.1 | 882.2 | 899.9 | 1046.7 | 0% | 100% | 0.73 | Yes |
+
+### 에러 모델 (3개)
+
+| 모델 | 에러 원인 |
+|------|----------|
+| MoveNet (lightning) | NumPy 2.x 비호환 — tflite_runtime이 NumPy 1.x로 컴파일됨 |
+| MoveNet (thunder) | 동일 |
+| ZED BT (FAST) | Positional Tracking 미활성화 상태에서 Body Tracking 호출 |
+
+### 핵심 분석
+
+1. **E2E <50ms 달성**: YOLO 계열 6개 모델만 달성 (99.4~100%)
+2. **최고 속도**: YOLOv8n-Pose (27.7 FPS, E2E 35.7ms)
+3. **최고 균형**: YOLOv8s-Pose (25.1 FPS, E2E 39.5ms, Conf 0.99)
+4. **RTMPose**: ONNX Runtime CPU fallback으로 추정 — CUDAExecutionProvider 경고 발생
+5. **MediaPipe c=1**: 인식률 52.9%로 사용 불가 수준
+6. **발 키포인트**: Foot 지원 모델 중 실용적인 것은 MediaPipe c=0뿐 (E2E 63.6ms)
+
+### 3D 안정성 공통 이슈
+- 모든 모델에서 `right_shank` CV가 높음 (0.05~0.17) — Depth 노이즈 영향
+- Wholebody foot_heel CV 0.33~0.54로 매우 불안정
+
+### 다음 단계
+- [ ] MoveNet NumPy 에러 수정 (numpy<2 재설치 확인)
+- [ ] ZED BT positional tracking 활성화 후 재측정
+- [ ] RTMPose CUDA EP 미사용 원인 조사
+- [ ] YOLOv8s-Pose 기반 3D 파이프라인 심화 테스트
+
+---
+
 ## [2026-03-24] 모델 비교 프레임워크 구축 + YOLO26 + 영상 녹화 + Global Shutter
 
 **브랜치**: `claude/analyze-project-results-FjIrj`
