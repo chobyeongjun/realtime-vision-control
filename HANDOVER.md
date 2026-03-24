@@ -1,9 +1,37 @@
 # RealTime_Pose_Estimation 프로젝트 인수인계서
 
-> 작성일: 2026-03-18
+> 최종 업데이트: 2026-03-24
 > 작성자: Claude Code (AI Assistant)
-> Branch: `claude/fix-python-dependencies-DsY3U`
-> 환경: Jetson Orin NX 16GB + PLink-AI JETSON-ORIN-IO-BASE + ZED X Mini (SVGA@120fps)
+> 현재 브랜치: `claude/analyze-project-results-FjIrj`
+> 소스 브랜치: `claude/fix-python-dependencies-DsY3U`
+> 환경: Jetson Orin NX 16GB + PLink-AI JETSON-ORIN-IO-BASE + ZED X Mini (Global Shutter, SVGA@120fps)
+>
+> **관련 문서**: CLAUDE.md (작업 규칙), CHANGELOG.md (변경 이력), TROUBLESHOOTING.md (문제 해결)
+
+## 0. 빠른 시작 (Jetson에서)
+
+```bash
+# 최신 코드 가져오기
+cd ~/RealTime_Pose_Estimation
+git pull origin claude/analyze-project-results-FjIrj
+
+# 가상환경 활성화
+source venv/bin/activate
+
+# 모델 동작 확인
+python3 benchmarks/verify_models.py
+
+# 5종 모델 벤치마크 실행 (각 15초)
+python3 benchmarks/run_benchmark.py --models all --duration 15
+
+# 스켈레톤 영상 녹화 (개별 모델)
+python3 benchmarks/run_record_demo.py --models yolo26 rtmpose_wb --duration 30
+
+# 5종 모델 그리드 비교 영상
+python3 benchmarks/run_comparison_video.py --duration 30
+```
+
+---
 
 ---
 
@@ -82,29 +110,36 @@
 
 ```
 RealTime_Pose_Estimation/
+├── CLAUDE.md                     # ★ Claude Code 작업 규칙 (반드시 읽기)
+├── CHANGELOG.md                  # ★ 변경 이력 로그 (에러 해결, 결과 분석)
+├── HANDOVER.md                   # ← 이 인수인계서
 ├── README.md                     # 프로젝트 소개
 ├── INSTALL_GUIDE.md              # Jetson 설치 가이드 (상세)
 ├── TROUBLESHOOTING.md            # 트러블슈팅 매뉴얼 (10개 항목)
 ├── PROJECT_NOTES.md              # 프로젝트 백업 정리
-├── HANDOVER.md                   # ← 이 인수인계서
 ├── requirements.txt              # Python 패키지 목록
 │
 └── benchmarks/
-    ├── pose_models.py            # 통합 포즈 모델 인터페이스 (6개 모델)
-    ├── zed_camera.py             # 카메라 추상화 (ZED/웹캠/동영상/SVO2)
+    ├── pose_models.py            # 통합 포즈 모델 인터페이스 (6개 모델, YOLO26 포함)
+    ├── zed_camera.py             # 카메라 추상화 (ZED/웹캠/동영상/SVO2, Global Shutter 지원)
     ├── joint_angles.py           # 하지 관절각도 계산
     ├── metrics_3d.py             # 3D 정확도 메트릭
     ├── mocap_validation.py       # 모캡 비교 프레임워크
+    ├── postprocess_accel.py      # 후처리 가속 (C++ 확장 래퍼)
+    ├── select_roi.py             # ROI 크롭 관리
     │
-    │── run_benchmark.py          # 핵심 벤치마크 러너
-    │── run_full_benchmark.py     # 전체 모델 × 시나리오 벤치마크
-    │── run_trt_comparison.py     # TensorRT vs 기본 비교
-    │── run_int8_comparison.py    # INT8 양자화 비교 (FP16/INT8-nocal/INT8-cal)
-    │── run_int8_full_pipeline.py # INT8 전체 파이프라인 (녹화→캘리→빌드→벤치)
-    │── run_record_demo.py        # 데모 동영상 녹화
+    ├── run_benchmark.py          # 핵심 벤치마크 러너 (카메라 메타데이터 포함)
+    ├── run_full_benchmark.py     # 전체 모델 × 시나리오 벤치마크
+    ├── run_comparison_video.py   # ★ 5종 모델 그리드 비교 영상 (2x3 레이아웃)
+    ├── run_record_demo.py        # 개별 모델 데모 영상 (관절각도 오버레이 + CSV)
+    ├── run_trt_comparison.py     # TensorRT vs 기본 비교
+    ├── run_int8_comparison.py    # INT8 양자화 비교 (FP16/INT8-nocal/INT8-cal)
+    ├── run_int8_full_pipeline.py # INT8 전체 파이프라인 (녹화→캘리→빌드→벤치)
+    ├── run_cropped_demo.py       # 크롭 영역 데모
+    ├── run_rtm_movenet_benchmark.py # RTMPose/MoveNet 전용 벤치마크
     │
     ├── calibrate_int8.py         # RTMPose INT8 캘리브레이션
-    ├── calibrate_yolo.py         # YOLOv8 INT8 캘리브레이션 (워킹 영상 기반)
+    ├── calibrate_yolo.py         # YOLO INT8 캘리브레이션 (워킹 영상 기반)
     ├── record_zed.py             # ZED 녹화 (SVO2/MP4)
     ├── analyze_results.py        # 결과 분석 + HTML 리포트
     ├── prepare_test_data.py      # 테스트 데이터 준비
@@ -112,7 +147,12 @@ RealTime_Pose_Estimation/
     ├── verify_foot_indices.py    # 발 키포인트 인덱스 검증
     ├── download_movenet.py       # MoveNet 모델 다운로드
     ├── check_trt_status.py       # TensorRT 환경 진단
-    └── setup_jetson.sh           # Jetson 자동 설치 스크립트
+    ├── jetson_optimizer.py       # Jetson 성능 최적화 (jetson_clocks 등)
+    ├── setup_jetson.sh           # Jetson 자동 설치 스크립트
+    │
+    └── cpp_ext/                  # C++ 후처리 가속 확장
+        ├── pose_postprocess.cpp  # C++ 구현 (2D→3D, 필터링, 각도 계산)
+        └── setup.py              # 빌드 스크립트
 ```
 
 ---
