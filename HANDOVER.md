@@ -237,7 +237,26 @@ python3 verify_models.py
 
 ---
 
-## 6. 미해결 이슈 (인수인계 필요)
+## 6. 최신 벤치마크 결과 (2026-03-24)
+
+### 성능 요약 (E2E <50ms 목표)
+- **YOLO 계열 6개 모델**: 모두 <50ms 달성 (99.4~100%)
+- **RTMPose/MediaPipe/Wholebody**: 모두 FAIL
+- **에러**: MoveNet (NumPy 2.x 비호환), ZED BT (Positional Tracking 미활성화)
+
+### 추천 모델
+1. **YOLOv8s-Pose**: E2E 39.5ms, Conf 0.99, 인식률 100% (최적 균형)
+2. **YOLOv8n-Pose**: E2E 35.7ms, 27.7 FPS (최고 속도)
+
+### RTMPose 주의사항
+- CUDAExecutionProvider 경고 발생 → CPU fallback으로 추정
+- 결과적으로 E2E 150~900ms로 목표 대비 3~18배 초과
+
+자세한 수치는 `CHANGELOG.md` 참조.
+
+---
+
+## 7. 미해결 이슈 (인수인계 필요)
 
 ### 6.1 INT8 양자화 최종 검증 미완료
 
