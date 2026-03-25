@@ -5,6 +5,45 @@
 
 ---
 
+## [2026-03-25] 하체 전용 Fine-Tuning 프레임워크 구축
+
+**브랜치**: `claude/analyze-project-results-FjIrj`
+
+### 배경
+- 기존 모델(YOLO26s-pose 등)은 전신 17kpt로 학습 → 발목(ankle)까지만 인식
+- heel/toe는 IMU 센서가 커버 → 비전 모델은 hip/knee/ankle 6kpt에 집중
+- 하체에 capacity를 집중하여 정확도 향상 + 떨림 감소 목표
+
+### 추가된 파일 (training/ 디렉토리)
+| 파일 | 목적 |
+|------|------|
+| `training/__init__.py` | 패키지 초기화 |
+| `training/convert_coco_to_lower_body.py` | COCO 17kpt → 하체 6kpt YOLO 포맷 변환 |
+| `training/validate_dataset.py` | 변환된 데이터셋 품질 검증 + 시각화 |
+| `training/lower_body_pose.yaml` | YOLO 학습용 데이터셋 설정 (kpt_shape: [6, 3]) |
+| `training/train_lower_body.py` | YOLO26s-pose Fine-Tuning (Multi-GPU, dry-run) |
+| `training/export_for_jetson.py` | 학습 모델 ONNX/TRT 내보내기 |
+
+### 수정된 파일
+- `benchmarks/pose_models.py`: `LowerBodyPoseModel` 클래스 + MODEL_REGISTRY 추가
+  - 원본 `YOLOv8Pose`와 완전 분리
+  - 1-Stage / 2-Stage 파이프라인 지원
+  - Registry: `"lower_body"`, `"lower_body_2stage"`
+
+### 핵심 설계
+- **6 keypoints**: left/right × hip/knee/ankle (heel/toe는 IMU 담당)
+- **YOLO26s-pose pretrained → Fine-Tuning**: Backbone/Neck 가중치 재사용, Pose Head만 재초기화
+- **표준 COCO 데이터셋 ~150K+ annotations** 활용 (COCO-WholeBody 불필요)
+- **원본 모델 보존**: yolo26s-pose.pt 절대 수정 안 함, 커스텀은 yolo26s-lower6 명명
+
+### 다음 단계
+1. 학습 서버에서 COCO 데이터 다운로드 + 변환
+2. dry-run (5 epoch) → 본 학습 (200 epoch)
+3. ONNX 내보내기 → Jetson 전송 → TRT FP16 빌드
+4. 벤치마크 비교 (기존 17kpt vs 새 6kpt)
+
+---
+
 ## [2026-03-24] 벤치마크 실행 결과 분석 (12개 모델 성공, 3개 에러)
 
 **브랜치**: `claude/analyze-project-results-FjIrj`

@@ -1804,6 +1804,289 @@ class MoveNetModel(PoseModel):
         return result
 
 
+# ============================================================================
+# 7. LowerBodyPoseModel — 하체 전용 6kpt 커스텀 모델
+# ============================================================================
+class LowerBodyPoseModel(PoseModel):
+    """
+    하체 전용 YOLO-Pose 모델 (6 keypoints: hip/knee/ankle)
+
+    YOLO26s-pose를 하체 전용으로 Fine-Tuning한 커스텀 모델.
+    원본 YOLO26s-pose (17kpt)와 완전히 분리된 별도 모델입니다.
+
+    지원 모드:
+      - 1-Stage: 전체 프레임에서 직접 하체 검출+포즈 추론
+      - 2-Stage: 기존 YOLO(17kpt)로 사람 검출 → 하체 crop → 하체 모델로 정밀 추론
+
+    명명 규칙:
+      - 모델 파일: yolo26s-lower6-416.pt / .onnx / .engine
+      - Registry 키: "lower_body", "lower_body_2stage"
+    """
+
+    KEYPOINT_MAP = {
+        0: "left_hip",
+        1: "right_hip",
+        2: "left_knee",
+        3: "right_knee",
+        4: "left_ankle",
+        5: "right_ankle",
+    }
+
+    JOINT_ANGLE_TRIPLETS = {
+        "left_knee_angle":  ("left_hip", "left_knee", "left_ankle"),
+        "right_knee_angle": ("right_hip", "right_knee", "right_ankle"),
+    }
+
+    def __init__(self, model_path=None, use_tensorrt=False,
+                 imgsz=416, two_stage=False, stage1_model=None,
+                 conf=0.25, iou=0.7, max_det=1, half=True,
+                 smoothing=0.0, filter_min_cutoff=1.0, filter_beta=0.007,
+                 segment_constraint=True, seg_calib_frames=30, seg_tolerance=0.15,
+                 seg_calib_file=None):
+        """
+        Args:
+            model_path: 커스텀 학습된 모델 (.pt/.onnx/.engine)
+            use_tensorrt: TRT 엔진 사용 여부
+            imgsz: 입력 해상도 (학습 시와 동일해야 함)
+            two_stage: 2-Stage 파이프라인 사용
+            stage1_model: 2-Stage 시 Stage1 전신 모델 (YOLOv8Pose 인스턴스)
+            conf, iou, max_det, half: YOLO 추론 파라미터
+            smoothing: One Euro Filter (0=OFF)
+            filter_min_cutoff, filter_beta: 필터 파라미터
+            segment_constraint: 뼈 길이 제약 ON/OFF
+        """
+        mode_str = "2-Stage" if two_stage else "1-Stage"
+        trt_str = " TRT-FP16" if use_tensorrt else ""
+        super().__init__(f"LowerBody-6kpt ({mode_str}{trt_str})")
+
+        self.model_path = model_path
+        self.use_tensorrt = use_tensorrt
+        self.imgsz = imgsz
+        self.two_stage = two_stage
+        self.stage1_model = stage1_model
+        self.model = None
+
+        # 추론 파라미터
+        self.conf = conf
+        self.iou = iou
+        self.max_det = max_det
+        self.half = half
+
+        # One Euro Filter
+        self.smoothing = smoothing
+        self._kp_filter = KeypointOneEuroFilter(
+            min_cutoff=filter_min_cutoff, beta=filter_beta
+        ) if smoothing > 0 else None
+
+        # 세그먼트 길이 제약
+        self._seg_constraint = SegmentLengthConstraint(
+            calib_frames=seg_calib_frames, tolerance=seg_tolerance,
+            calib_file=seg_calib_file,
+        ) if segment_constraint else None
+
+    def load(self):
+        try:
+            from ultralytics import YOLO
+        except ImportError:
+            raise ImportError("ultralytics 미설치. pip install ultralytics")
+
+        if self.model_path is None:
+            print(f"  [{self.name}] WARNING: model_path 미지정. "
+                  f"학습된 모델 경로를 지정하세요.")
+            print(f"  예: LowerBodyPoseModel(model_path='yolo26s-lower6-416.pt')")
+            return
+
+        print(f"  [{self.name}] 모델 로드: {self.model_path}")
+
+        if self.use_tensorrt:
+            # TRT 엔진 직접 로드
+            engine_path = self.model_path
+            if engine_path.endswith(".pt"):
+                # .pt → .engine 변환 시도
+                engine_name = engine_path.replace(".pt", f"-{self.imgsz}.engine")
+                if os.path.exists(engine_name):
+                    engine_path = engine_name
+                else:
+                    print(f"  [{self.name}] TRT 엔진 빌드 중 (최초 1회)...")
+                    model = YOLO(self.model_path)
+                    exported = model.export(
+                        format="engine", half=True, imgsz=self.imgsz)
+                    engine_path = exported
+            self.model = YOLO(engine_path)
+            print(f"  [{self.name}] TRT 엔진 로드: {engine_path}")
+        else:
+            self.model = YOLO(self.model_path)
+
+        # 2-Stage: Stage1 모델도 로드
+        if self.two_stage and self.stage1_model is not None:
+            if not self.stage1_model.is_loaded:
+                print(f"  [{self.name}] Stage1 모델 로드 중...")
+                self.stage1_model.load()
+
+        # 워밍업
+        dummy = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
+        self.model(dummy, verbose=False, imgsz=self.imgsz)
+
+        self.is_loaded = True
+        print(f"  [{self.name}] 로드 완료")
+
+    def _crop_lower_body(self, rgb_image, stage1_result):
+        """
+        Stage1 결과로부터 하체 영역 crop.
+
+        Returns:
+            (cropped_image, crop_info) where crop_info = (x_off, y_off, crop_w, crop_h)
+            or (None, None) if crop 불가
+        """
+        h, w = rgb_image.shape[:2]
+
+        # Stage1에서 hip/ankle 위치 가져오기
+        kps = stage1_result.keypoints_2d
+        ys = []
+        xs = []
+        for name in ["left_hip", "right_hip", "left_knee", "right_knee",
+                      "left_ankle", "right_ankle"]:
+            if name in kps:
+                px, py = kps[name]
+                if stage1_result.confidences.get(name, 0) > 0.3:
+                    xs.append(px)
+                    ys.append(py)
+
+        if len(xs) < 2:
+            return None, None
+
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+        bw = x_max - x_min
+        bh = y_max - y_min
+
+        # 패딩 (여유)
+        pad = 0.3
+        x1 = max(0, int(x_min - bw * pad))
+        y1 = max(0, int(y_min - bh * (pad + 0.1)))  # hip 위로 여유
+        x2 = min(w, int(x_max + bw * pad))
+        y2 = min(h, int(y_max + bh * (pad + 0.05)))  # ankle 아래 여유
+
+        crop_w = x2 - x1
+        crop_h = y2 - y1
+        if crop_w < 20 or crop_h < 20:
+            return None, None
+
+        cropped = rgb_image[y1:y2, x1:x2]
+        return cropped, (x1, y1, crop_w, crop_h)
+
+    def _back_project_keypoints(self, result, crop_info):
+        """crop 좌표 → 원본 이미지 좌표로 변환"""
+        x_off, y_off, crop_w, crop_h = crop_info
+        new_kps = {}
+        for name, (px, py) in result.keypoints_2d.items():
+            # crop 내 비율 계산 후 offset 적용
+            new_kps[name] = (px + x_off, py + y_off)
+        result.keypoints_2d = new_kps
+
+    def predict(self, rgb_image: np.ndarray) -> PoseResult:
+        result = PoseResult()
+        t0 = time.perf_counter()
+
+        input_image = rgb_image
+        crop_info = None
+
+        # 2-Stage: Stage1 → crop
+        if self.two_stage and self.stage1_model is not None:
+            stage1_result = self.stage1_model.predict(rgb_image)
+            if stage1_result.detected:
+                cropped, crop_info = self._crop_lower_body(rgb_image, stage1_result)
+                if cropped is not None:
+                    input_image = cropped
+
+        # YOLO 추론
+        results = self.model(
+            input_image,
+            verbose=False,
+            conf=self.conf,
+            iou=self.iou,
+            imgsz=self.imgsz,
+            max_det=self.max_det,
+            half=self.half,
+        )
+
+        t_infer = time.perf_counter()
+        result.inference_time_ms = (t_infer - t0) * 1000
+
+        # 결과 파싱
+        if results and len(results) > 0 and results[0].keypoints is not None:
+            kps_data = results[0].keypoints.data
+            if len(kps_data) > 0:
+                person_kps = kps_data[0].cpu().numpy()
+                ih, iw = input_image.shape[:2]
+
+                valid_count = 0
+                for idx, our_name in self.KEYPOINT_MAP.items():
+                    if idx < len(person_kps):
+                        kp = person_kps[idx]
+                        x, y = float(kp[0]), float(kp[1])
+                        conf = float(kp[2]) if len(kp) > 2 else 1.0
+
+                        if conf > 0.01 and x > 0 and y > 0:
+                            result.keypoints_2d[our_name] = (x, y)
+                            result.confidences[our_name] = conf
+                            if conf > 0.3:
+                                valid_count += 1
+                        else:
+                            result.confidences[our_name] = 0.0
+
+                if valid_count >= 3:
+                    result.detected = True
+
+        # 2-Stage: crop 좌표 → 원본 좌표
+        if crop_info is not None and result.detected:
+            self._back_project_keypoints(result, crop_info)
+
+        # One Euro Filter (떨림 감소)
+        if self._kp_filter is not None and result.detected:
+            t_now = time.perf_counter()
+            for name in list(result.keypoints_2d.keys()):
+                x, y = result.keypoints_2d[name]
+                fx, fy = self._kp_filter.filter(name, t_now, x, y)
+                result.keypoints_2d[name] = (fx, fy)
+
+        # 세그먼트 길이 제약
+        if self._seg_constraint is not None and result.detected:
+            result.keypoints_2d = self._seg_constraint.apply(
+                result.keypoints_2d, result.confidences)
+
+        # 관절 각도 계산
+        if result.detected:
+            for angle_name, (p, j, c) in self.JOINT_ANGLE_TRIPLETS.items():
+                if (p in result.keypoints_2d and
+                    j in result.keypoints_2d and
+                    c in result.keypoints_2d):
+                    min_conf = min(
+                        result.confidences.get(p, 0),
+                        result.confidences.get(j, 0),
+                        result.confidences.get(c, 0),
+                    )
+                    if min_conf >= 0.3:
+                        angle = self._calc_angle(
+                            result.keypoints_2d[p],
+                            result.keypoints_2d[j],
+                            result.keypoints_2d[c],
+                        )
+                        result.joint_angles[angle_name] = angle
+
+        result.timing_detail["total_predict_ms"] = (time.perf_counter() - t0) * 1000
+        return result
+
+    @staticmethod
+    def _calc_angle(p1, p2, p3):
+        """세 점 사이의 각도 계산 (p2가 관절점, 도 단위)"""
+        v1 = np.array([p1[0] - p2[0], p1[1] - p2[1]])
+        v2 = np.array([p3[0] - p2[0], p3[1] - p2[1]])
+        cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8)
+        cos_angle = np.clip(cos_angle, -1.0, 1.0)
+        return float(np.degrees(np.arccos(cos_angle)))
+
+
 # MoveNet을 포함한 모델 레지스트리
 MODEL_REGISTRY = {
     "mediapipe": lambda **kw: MediaPipePose(model_complexity=kw.get("complexity", 1)),
@@ -1854,6 +2137,23 @@ MODEL_REGISTRY = {
                                           use_tensorrt=False),
     "movenet_trt": lambda **kw: MoveNetModel(variant=kw.get("variant", "lightning"),
                                               use_tensorrt=True),
+    # 하체 전용 커스텀 모델 (Fine-Tuned, 원본 YOLO26s와 완전 분리)
+    "lower_body": lambda **kw: LowerBodyPoseModel(
+        model_path=kw.get("model_path"),
+        use_tensorrt=kw.get("tensorrt", False),
+        imgsz=kw.get("imgsz", 416),
+        two_stage=False,
+        smoothing=kw.get("smoothing", 0.0),
+    ),
+    "lower_body_2stage": lambda **kw: LowerBodyPoseModel(
+        model_path=kw.get("model_path"),
+        use_tensorrt=kw.get("tensorrt", False),
+        imgsz=kw.get("imgsz", 416),
+        two_stage=True,
+        stage1_model=YOLOv8Pose(
+            model_size="s", use_tensorrt=True, yolo_version="v26"),
+        smoothing=kw.get("smoothing", 0.0),
+    ),
 }
 
 

@@ -1,6 +1,6 @@
 # RealTime_Pose_Estimation 프로젝트 인수인계서
 
-> 최종 업데이트: 2026-03-24
+> 최종 업데이트: 2026-03-25
 > 작성자: Claude Code (AI Assistant)
 > 현재 브랜치: `claude/analyze-project-results-FjIrj`
 > 소스 브랜치: `claude/fix-python-dependencies-DsY3U`
@@ -373,8 +373,54 @@ d16f5a3  Initial commit
 
 ---
 
-## 10. 관련 문서 참조
+## 10. 하체 전용 Fine-Tuning 프레임워크 (2026-03-25 추가)
+
+### 개요
+YOLO26s-pose(17kpt)를 하체 전용 6kpt로 Fine-Tuning하는 프레임워크. 원본 모델과 완전 분리.
+
+### training/ 디렉토리 구조
+```
+training/
+├── __init__.py                    # 패키지 초기화
+├── convert_coco_to_lower_body.py  # COCO → 하체 6kpt YOLO 변환
+├── validate_dataset.py            # 데이터셋 품질 검증 + 시각화
+├── lower_body_pose.yaml           # 학습 데이터셋 설정
+├── train_lower_body.py            # YOLO26s Fine-Tuning (dry-run 지원)
+└── export_for_jetson.py           # ONNX/TRT 내보내기
+```
+
+### 학습 워크플로우
+```bash
+# 1. 데이터 변환 (학습 서버)
+python training/convert_coco_to_lower_body.py --coco-dir ./data/coco --output-dir ./data/lower_body
+
+# 2. 데이터 검증
+python training/validate_dataset.py --dataset-dir ./data/lower_body
+
+# 3. 사전 테스트 (5 epoch)
+python training/train_lower_body.py --dry-run
+
+# 4. 본 학습 (RTX 5090 x2)
+python training/train_lower_body.py --device 0,1 --batch 128
+
+# 5. ONNX 내보내기
+python training/export_for_jetson.py --weights runs/pose/lower_body_yolo26s_v1/weights/best.pt
+
+# 6. Jetson에서 TRT 빌드
+python training/export_for_jetson.py --weights best.onnx --format engine --half
+```
+
+### pose_models.py 변경사항
+- `LowerBodyPoseModel` 클래스 추가 (기존 YOLOv8Pose와 완전 분리)
+- MODEL_REGISTRY: `"lower_body"` (1-Stage), `"lower_body_2stage"` (2-Stage)
+- 6 keypoints: left/right × hip/knee/ankle
+- 모델 명명: `yolo26s-lower6` (원본 `yolo26s-pose`와 구분)
+
+---
+
+## 11. 관련 문서 참조
 
 - `INSTALL_GUIDE.md`: Jetson 설치 가이드 (라이브러리별 상세)
 - `TROUBLESHOOTING.md`: 트러블슈팅 매뉴얼 (10개 문제-해결 항목)
 - `PROJECT_NOTES.md`: 프로젝트 전체 정리 (파일 구조, 코드 요약, 디버깅 히스토리)
+- `HANDOVER_LowerBody_Training.md`: 하체 학습 원본 계획서 (10kpt 버전, 참고용)
