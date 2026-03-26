@@ -40,7 +40,7 @@ def parse_args():
     )
 
     # 학습 설정
-    parser.add_argument("--imgsz", type=int, default=416, help="입력 해상도 (기본: 416)")
+    parser.add_argument("--imgsz", type=int, default=640, help="입력 해상도 (기본: 640, 카메라 crop 640x600에 맞춤)")
     parser.add_argument("--epochs", type=int, default=200, help="에포크 수 (기본: 200)")
     parser.add_argument("--batch", type=int, default=128, help="배치 크기 (기본: 128)")
     parser.add_argument("--device", default="0", help="GPU 장치 (기본: 0, 듀얼: 0,1)")
