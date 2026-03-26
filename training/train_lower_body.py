@@ -41,11 +41,11 @@ def parse_args():
 
     # 학습 설정 (RTX 5090 32GB 최대 활용 기본값)
     parser.add_argument("--imgsz", type=int, default=640, help="입력 해상도 (기본: 640, 카메라 crop 640x600에 맞춤)")
-    parser.add_argument("--epochs", type=int, default=200, help="에포크 수 (기본: 200)")
+    parser.add_argument("--epochs", type=int, default=500, help="최대 에포크 (기본: 500, patience로 자동 조기종료)")
     parser.add_argument("--batch", type=int, default=-1, help="배치 크기 (기본: -1 = AutoBatch, VRAM 한계까지 자동 최대)")
     parser.add_argument("--device", default="0", help="GPU 장치 (기본: 0)")
     parser.add_argument("--workers", type=int, default=16, help="데이터 로더 워커 (기본: 16, GPU 풀 가동)")
-    parser.add_argument("--patience", type=int, default=30, help="Early stopping patience (기본: 30)")
+    parser.add_argument("--patience", type=int, default=50, help="Early stopping patience (기본: 50, 50번 연속 개선 없으면 종료)")
 
     # 학습률
     parser.add_argument("--lr0", type=float, default=0.01, help="초기 학습률 (기본: 0.01)")
