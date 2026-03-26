@@ -45,8 +45,8 @@ def parse_args():
         help="내보내기 포맷 (기본: onnx)"
     )
     parser.add_argument(
-        "--imgsz", type=int, default=416,
-        help="입력 해상도 (학습 시 사용한 값과 동일해야 함, 기본: 416)"
+        "--imgsz", type=int, default=640,
+        help="입력 해상도 (학습 시 사용한 값과 동일해야 함, 기본: 640)"
     )
     parser.add_argument(
         "--half", action="store_true",
@@ -112,7 +112,7 @@ def export_model(args):
     if args.output_name:
         output_stem = args.output_name
     else:
-        output_stem = f"yolo26s-lower6-{args.imgsz}"
+        output_stem = f"yolo26s-lower6-{args.imgsz}"  # 예: yolo26s-lower6-640
 
     if args.format == "onnx":
         print(f"  ONNX 내보내기 (opset={args.opset}, simplify={args.simplify})")

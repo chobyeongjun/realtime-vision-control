@@ -1838,7 +1838,7 @@ class LowerBodyPoseModel(PoseModel):
     }
 
     def __init__(self, model_path=None, use_tensorrt=False,
-                 imgsz=416, two_stage=False, stage1_model=None,
+                 imgsz=640, two_stage=False, stage1_model=None,
                  conf=0.25, iou=0.7, max_det=1, half=True,
                  smoothing=0.0, filter_min_cutoff=1.0, filter_beta=0.007,
                  segment_constraint=True, seg_calib_frames=30, seg_tolerance=0.15,
@@ -2141,14 +2141,14 @@ MODEL_REGISTRY = {
     "lower_body": lambda **kw: LowerBodyPoseModel(
         model_path=kw.get("model_path"),
         use_tensorrt=kw.get("tensorrt", False),
-        imgsz=kw.get("imgsz", 416),
+        imgsz=kw.get("imgsz", 640),
         two_stage=False,
         smoothing=kw.get("smoothing", 0.0),
     ),
     "lower_body_2stage": lambda **kw: LowerBodyPoseModel(
         model_path=kw.get("model_path"),
         use_tensorrt=kw.get("tensorrt", False),
-        imgsz=kw.get("imgsz", 416),
+        imgsz=kw.get("imgsz", 640),
         two_stage=True,
         stage1_model=YOLOv8Pose(
             model_size="s", use_tensorrt=True, yolo_version="v26"),
