@@ -90,7 +90,7 @@ def validate_environment(args):
             print(f"  GPU count: {gpu_count}")
             for i in range(gpu_count):
                 name = torch.cuda.get_device_name(i)
-                mem = torch.cuda.get_device_properties(i).total_mem / 1e9
+                mem = torch.cuda.get_device_properties(i).total_memory / 1e9
                 print(f"    GPU {i}: {name} ({mem:.1f} GB)")
         else:
             print("  WARNING: CUDA 없음! CPU 학습은 매우 느립니다.")
