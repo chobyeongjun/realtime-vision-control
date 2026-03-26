@@ -39,12 +39,12 @@ def parse_args():
         help="데이터셋 YAML (기본: training/lower_body_pose.yaml)"
     )
 
-    # 학습 설정
+    # 학습 설정 (RTX 5090 32GB 최대 활용 기본값)
     parser.add_argument("--imgsz", type=int, default=640, help="입력 해상도 (기본: 640, 카메라 crop 640x600에 맞춤)")
     parser.add_argument("--epochs", type=int, default=200, help="에포크 수 (기본: 200)")
-    parser.add_argument("--batch", type=int, default=128, help="배치 크기 (기본: 128)")
-    parser.add_argument("--device", default="0", help="GPU 장치 (기본: 0, 듀얼: 0,1)")
-    parser.add_argument("--workers", type=int, default=16, help="데이터 로더 워커 (기본: 16)")
+    parser.add_argument("--batch", type=int, default=-1, help="배치 크기 (기본: -1 = AutoBatch, VRAM 한계까지 자동 최대)")
+    parser.add_argument("--device", default="0", help="GPU 장치 (기본: 0)")
+    parser.add_argument("--workers", type=int, default=16, help="데이터 로더 워커 (기본: 16, GPU 풀 가동)")
     parser.add_argument("--patience", type=int, default=30, help="Early stopping patience (기본: 30)")
 
     # 학습률
