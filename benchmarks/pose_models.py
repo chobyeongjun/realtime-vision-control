@@ -2052,7 +2052,7 @@ class LowerBodyPoseModel(PoseModel):
 
         # 세그먼트 길이 제약
         if self._seg_constraint is not None and result.detected:
-            result.keypoints_2d = self._seg_constraint.apply(
+            result.keypoints_2d = self._seg_constraint.update(
                 result.keypoints_2d, result.confidences)
 
         # 관절 각도 계산
