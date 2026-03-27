@@ -5,6 +5,77 @@
 
 ---
 
+## [2026-03-27] 1차 Fine-Tuning 완료 + Jetson 배포 + 2차 파이프라인 구축
+
+**브랜치**: `claude/analyze-project-results-FjIrj`
+
+### 1차 학습 결과 (RTX 5090, COCO 데이터)
+- **Best epoch**: 302/352 (EarlyStopping patience=50으로 자동 종료)
+- **Pose mAP50**: 88.5%
+- **Pose mAP50-95**: 77.7%
+- **학습 시간**: 25.8시간 (RTX 5090, batch=24 AutoBatch)
+
+### Jetson 실시간 테스트 결과
+| 항목 | 기존 YOLO26s (17kpt) | 새 하체 모델 (6kpt) | 개선 |
+|------|---------------------|-------------------|------|
+| 추론 속도 | 44ms | **18ms** | **2.4배 빠름** |
+| 인식률 | 100% | **100%** | 동일 |
+| Confidence | 0.97 | **0.99** | 향상 |
+| 키포인트 | 17개 (전신) | **6개 (하체)** | 집중도↑ |
+
+### 해결한 에러들
+
+#### Fix 1: `total_mem` → `total_memory` (PyTorch 2.11 호환)
+- **증상**: `AttributeError: 'torch._C._CudaDeviceProperties' object has no attribute 'total_mem'`
+- **원인**: PyTorch 2.11에서 속성명 변경
+- **해결**: `train_lower_body.py:93` — `total_mem` → `total_memory`
+- **커밋**: `d88fed3`
+
+#### Fix 2: `runs/pose/runs/pose/` 이중 경로
+- **증상**: 학습 결과가 `runs/pose/runs/pose/lower_body_v1/`에 저장됨
+- **원인**: `--project=runs/pose` 설정 + Ultralytics가 내부적으로 `pose/` 추가
+- **해결**: `--project` 기본값을 `runs`로 변경
+- **커밋**: `36ca5fe`
+
+#### Fix 3: TRT 엔진 `task=detect` 인식 오류
+- **증상**: `WARNING: Unable to automatically guess model task, assuming 'task=detect'` → not detected
+- **원인**: TRT 엔진 파일에 task 메타데이터 없음
+- **해결**: `YOLO(engine_path, task="pose")` 명시적 task 지정
+- **커밋**: `37e5018`
+
+#### Fix 4: `SegmentLengthConstraint.apply()` 메서드 없음
+- **증상**: `AttributeError: 'SegmentLengthConstraint' object has no attribute 'apply'`
+- **원인**: 실제 메서드명은 `update()`
+- **해결**: `.apply()` → `.update()` 변경
+- **커밋**: `7bc1b58`
+
+#### Fix 5: `SegmentLengthConstraint.update()` 반환값 대입 오류
+- **증상**: `TypeError: argument of type 'bool' is not iterable`
+- **원인**: `update()`는 in-place 수정 + bool 반환인데 결과를 대입함
+- **해결**: `result.keypoints_2d = self._seg_constraint.update(...)` → `self._seg_constraint.update(...)`
+- **커밋**: `28a25e8`
+
+#### Fix 6: imgsz 416 → 640 변경
+- **증상**: 카메라 crop 640×600인데 416으로 축소 → 유용한 픽셀 손실
+- **원인**: 하체만 찍는 카메라에서 416은 불필요한 다운스케일
+- **해결**: train/export/inference 모두 imgsz=640으로 통일
+- **커밋**: `585a91c`
+
+### 추가된 파일 (2차 Fine-Tuning용)
+| 파일 | 목적 |
+|------|------|
+| `training/auto_label_walker.py` | 워커 ZED 영상 자동 라벨링 |
+| `training/walker_data.yaml` | 워커 데이터 학습 설정 |
+| `models/yolo26s-lower6.pt` | 1차 학습 모델 (pretrained 6kpt) |
+| `models/yolo26s-lower6.onnx` | 1차 ONNX |
+
+### 학습 기본값 (RTX 5090 최적화)
+```
+epochs=500, patience=50, batch=-1 (AutoBatch), workers=16, imgsz=640
+```
+
+---
+
 ## [2026-03-25] 하체 전용 Fine-Tuning 프레임워크 구축
 
 **브랜치**: `claude/analyze-project-results-FjIrj`

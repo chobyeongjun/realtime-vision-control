@@ -1,6 +1,6 @@
 # RealTime_Pose_Estimation 프로젝트 인수인계서
 
-> 최종 업데이트: 2026-03-25
+> 최종 업데이트: 2026-03-27
 > 작성자: Claude Code (AI Assistant)
 > 현재 브랜치: `claude/analyze-project-results-FjIrj`
 > 소스 브랜치: `claude/fix-python-dependencies-DsY3U`
@@ -373,10 +373,30 @@ d16f5a3  Initial commit
 
 ---
 
-## 10. 하체 전용 Fine-Tuning 프레임워크 (2026-03-25 추가)
+## 10. 하체 전용 Fine-Tuning 프레임워크
 
-### 개요
-YOLO26s-pose(17kpt)를 하체 전용 6kpt로 Fine-Tuning하는 프레임워크. 원본 모델과 완전 분리.
+### 현재 상태 (2026-03-27)
+```
+✅ 1차 Fine-Tuning 완료 (COCO 데이터, mAP50=88.5%)
+✅ Jetson TRT FP16 배포 완료 (추론 18ms, 인식률 100%)
+✅ 2차 Fine-Tuning 파이프라인 구축 완료
+⬜ 2차 Fine-Tuning (워커 실제 영상) — 촬영 후 진행
+```
+
+### 1차 학습 결과
+| 항목 | 기존 YOLO26s (17kpt) | 새 하체 모델 (6kpt) |
+|------|---------------------|-------------------|
+| 추론 속도 | 44ms | **18ms** (2.4배 빠름) |
+| 인식률 | 100% | **100%** |
+| Confidence | 0.97 | **0.99** |
+
+### models/ 파일 구조
+```
+models/
+├── yolo26s-lower6.pt      ← 1차 Pretrained 6kpt (COCO, 보존!)
+├── yolo26s-lower6.onnx    ← 1차 ONNX
+└── yolo26s-lower6.engine  ← 1차 TRT FP16 (Jetson에서 빌드)
+```
 
 ### training/ 디렉토리 구조
 ```
@@ -384,43 +404,90 @@ training/
 ├── __init__.py                    # 패키지 초기화
 ├── convert_coco_to_lower_body.py  # COCO → 하체 6kpt YOLO 변환
 ├── validate_dataset.py            # 데이터셋 품질 검증 + 시각화
-├── lower_body_pose.yaml           # 학습 데이터셋 설정
-├── train_lower_body.py            # YOLO26s Fine-Tuning (dry-run 지원)
-└── export_for_jetson.py           # ONNX/TRT 내보내기
+├── lower_body_pose.yaml           # 1차 학습 데이터셋 설정
+├── train_lower_body.py            # Fine-Tuning (AutoBatch, patience=50)
+├── export_for_jetson.py           # ONNX/TRT 내보내기 (GitHub 경유)
+├── auto_label_walker.py           # 워커 영상 자동 라벨링 (2차용)
+└── walker_data.yaml               # 2차 워커 데이터셋 설정
 ```
 
-### 학습 워크플로우
+### 1차 학습 워크플로우 (완료)
 ```bash
-# 1. 데이터 변환 (학습 서버)
+# RTX 5090에서:
 python training/convert_coco_to_lower_body.py --coco-dir ./data/coco --output-dir ./data/lower_body
-
-# 2. 데이터 검증
 python training/validate_dataset.py --dataset-dir ./data/lower_body
-
-# 3. 사전 테스트 (5 epoch)
 python training/train_lower_body.py --dry-run
+python training/train_lower_body.py --name lower_body_v1
+python training/export_for_jetson.py --weights <best.pt 경로> --format onnx
+# models/에 복사 → git push
 
-# 4. 본 학습 (RTX 5090 x2)
-python training/train_lower_body.py --device 0,1 --batch 128
-
-# 5. ONNX 내보내기
-python training/export_for_jetson.py --weights runs/pose/lower_body_yolo26s_v1/weights/best.pt
-
-# 6. Jetson에서 TRT 빌드
-python training/export_for_jetson.py --weights best.onnx --format engine --half
+# Jetson에서:
+git pull origin claude/analyze-project-results-FjIrj
+python training/export_for_jetson.py --weights models/yolo26s-lower6.pt --format engine --half
 ```
+
+### 2차 Fine-Tuning 워크플로우 (다음 단계)
+```bash
+# 1. [Jetson] 워커 보행 영상 촬영 (최소 2명, 5분씩)
+python benchmarks/record_zed.py --output recordings/walk_01.mp4 --duration 300 --preview
+python benchmarks/record_zed.py --output recordings/walk_02.mp4 --duration 300 --preview
+
+# 2. [RTX 5090] 영상 전송 후 자동 라벨링
+python training/auto_label_walker.py \
+    --video recordings/walk_01.mp4 recordings/walk_02.mp4 \
+    --model models/yolo26s-lower6.pt
+
+# 3. [RTX 5090] 시각화 확인
+eog data/walker/visualization/
+
+# 4. [RTX 5090] 2차 Fine-Tuning (1차 모델 기반)
+python training/train_lower_body.py \
+    --model models/yolo26s-lower6.pt \
+    --data training/walker_data.yaml \
+    --epochs 100 \
+    --name lower_body_v2_walker
+
+# 5. ONNX 내보내기 → GitHub push → Jetson git pull → TRT 빌드
+```
+
+### 학습 기본값 (RTX 5090 최적화)
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `--batch` | -1 | AutoBatch (VRAM 한계까지 자동) |
+| `--epochs` | 500 | 최대 에포크 (patience로 자동 종료) |
+| `--patience` | 50 | 50번 연속 개선 없으면 종료 |
+| `--imgsz` | 640 | 카메라 crop 640×600에 맞춤 |
+| `--workers` | 16 | 데이터 로딩 풀 가동 |
 
 ### pose_models.py 변경사항
 - `LowerBodyPoseModel` 클래스 추가 (기존 YOLOv8Pose와 완전 분리)
 - MODEL_REGISTRY: `"lower_body"` (1-Stage), `"lower_body_2stage"` (2-Stage)
 - 6 keypoints: left/right × hip/knee/ankle
-- 모델 명명: `yolo26s-lower6` (원본 `yolo26s-pose`와 구분)
+- YOLO 로드 시 `task="pose"` 명시 (TRT 엔진 호환)
+- SegmentLengthConstraint: `.update()` 메서드 사용 (in-place)
 
 ---
 
-## 11. 관련 문서 참조
+## 11. 알려진 에러와 해결 방법 (학습 파이프라인)
+
+| # | 증상 | 원인 | 해결 |
+|---|------|------|------|
+| 1 | `total_mem` AttributeError | PyTorch 2.11 속성명 변경 | `total_memory`로 변경 |
+| 2 | `runs/pose/runs/pose/` 이중 경로 | Ultralytics가 내부적으로 pose/ 추가 | `--project=runs`로 설정 |
+| 3 | TRT 엔진 `task=detect` 인식 | 엔진에 task 메타데이터 없음 | `YOLO(path, task="pose")` |
+| 4 | `SegmentLengthConstraint.apply()` 없음 | 실제 메서드명은 `update()` | `.update()` 사용 |
+| 5 | `update()` 반환값 bool 대입 오류 | in-place 수정인데 결과 대입 | 대입 제거 |
+| 6 | imgsz 416 → 카메라 640 불일치 | 카메라가 이미 하체만 촬영 | 전부 640으로 통일 |
+| 7 | `.gitignore`가 models/ 무시 | 프로젝트 gitignore 설정 | `git add -f` 로 강제 추가 |
+| 8 | GitHub push 인증 실패 | 비밀번호 로그인 불가 | Personal Access Token 사용 |
+| 9 | `cv2.VideoCapture(0)` ZED 타임아웃 | ZED는 OpenCV로 못 열음 | `create_camera(use_zed=True)` 사용 |
+
+---
+
+## 12. 관련 문서 참조
 
 - `INSTALL_GUIDE.md`: Jetson 설치 가이드 (라이브러리별 상세)
 - `TROUBLESHOOTING.md`: 트러블슈팅 매뉴얼 (10개 문제-해결 항목)
 - `PROJECT_NOTES.md`: 프로젝트 전체 정리 (파일 구조, 코드 요약, 디버깅 히스토리)
 - `HANDOVER_LowerBody_Training.md`: 하체 학습 원본 계획서 (10kpt 버전, 참고용)
+- `CHANGELOG.md`: 전체 변경 이력 + 에러 해결 기록
