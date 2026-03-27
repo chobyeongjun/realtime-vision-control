@@ -52,7 +52,7 @@ def parse_args():
     parser.add_argument("--lrf", type=float, default=0.01, help="최종 학습률 비율 (기본: 0.01)")
 
     # 출력 설정
-    parser.add_argument("--project", default="runs/pose", help="학습 결과 프로젝트 (기본: runs/pose)")
+    parser.add_argument("--project", default="runs", help="학습 결과 프로젝트 (기본: runs)")
     parser.add_argument("--name", default="lower_body_yolo26s_v1", help="실험 이름")
 
     # 안전 기능
