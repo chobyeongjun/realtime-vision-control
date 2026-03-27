@@ -2050,9 +2050,9 @@ class LowerBodyPoseModel(PoseModel):
                 fx, fy = self._kp_filter.filter(name, t_now, x, y)
                 result.keypoints_2d[name] = (fx, fy)
 
-        # 세그먼트 길이 제약
+        # 세그먼트 길이 제약 (in-place로 keypoints_2d 수정)
         if self._seg_constraint is not None and result.detected:
-            result.keypoints_2d = self._seg_constraint.update(
+            self._seg_constraint.update(
                 result.keypoints_2d, result.confidences)
 
         # 관절 각도 계산
