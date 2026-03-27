@@ -1912,10 +1912,10 @@ class LowerBodyPoseModel(PoseModel):
                     exported = model.export(
                         format="engine", half=True, imgsz=self.imgsz)
                     engine_path = exported
-            self.model = YOLO(engine_path)
+            self.model = YOLO(engine_path, task="pose")
             print(f"  [{self.name}] TRT 엔진 로드: {engine_path}")
         else:
-            self.model = YOLO(self.model_path)
+            self.model = YOLO(self.model_path, task="pose")
 
         # 2-Stage: Stage1 모델도 로드
         if self.two_stage and self.stage1_model is not None:
