@@ -7,23 +7,20 @@
 ⚠️  TensorRT 엔진은 반드시 Jetson에서 빌드해야 합니다!
     학습 서버(x86)에서 빌드한 엔진은 Jetson(aarch64)에서 작동하지 않습니다.
 
-사용법:
-    # 학습 서버에서: ONNX 내보내기
-    python export_for_jetson.py \
-        --weights runs/pose/lower_body_yolo26s_v1/weights/best.pt \
-        --format onnx
+워크플로우:
+    1. [학습 서버] ONNX 내보내기
+       python export_for_jetson.py --weights best.pt --format onnx
 
-    # Jetson에서: TensorRT FP16 내보내기
-    python export_for_jetson.py \
-        --weights best.pt \
-        --format engine \
-        --half
+    2. [학습 서버] models/ 에 복사 + GitHub push
+       cp best.pt models/yolo26s-lower6.pt
+       cp best.onnx models/yolo26s-lower6.onnx
+       git add models/ && git commit && git push
 
-    # 내보내기 후 검증
-    python export_for_jetson.py \
-        --weights best.onnx \
-        --validate \
-        --data training/lower_body_pose.yaml
+    3. [Jetson] git pull로 모델 받기
+       git pull origin claude/analyze-project-results-FjIrj
+
+    4. [Jetson] TensorRT FP16 엔진 빌드
+       python training/export_for_jetson.py --weights models/yolo26s-lower6.pt --format engine --half
 """
 
 import argparse
@@ -130,10 +127,13 @@ def export_model(args):
             size_mb = onnx_path.stat().st_size / 1e6
             print(f"  파일 크기: {size_mb:.1f} MB")
 
-        print(f"\n  Jetson 전송 후 TRT 빌드:")
-        print(f"    scp {exported_path} user@jetson:~/models/")
-        print(f"    # Jetson에서:")
-        print(f"    python export_for_jetson.py --weights {onnx_path.name} --format engine --half")
+        print(f"\n  다음 단계 (GitHub 경유):")
+        print(f"    mkdir -p models")
+        print(f"    cp {args.weights} models/yolo26s-lower6.pt")
+        print(f"    cp {exported_path} models/yolo26s-lower6.onnx")
+        print(f"    git add models/ && git commit -m 'Add trained lower body model' && git push")
+        print(f"    # Jetson에서: git pull → TRT 빌드")
+        print(f"    python training/export_for_jetson.py --weights models/yolo26s-lower6.pt --format engine --half")
 
     elif args.format == "engine":
         half = args.half
