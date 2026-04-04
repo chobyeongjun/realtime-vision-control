@@ -114,6 +114,48 @@ def verify_yolov8():
     return True
 
 
+def verify_yolo11():
+    """YOLO11-Pose 동작 확인"""
+    print("\n--- YOLO11-Pose ---")
+
+    # 1. import 확인
+    try:
+        from ultralytics import YOLO
+        import ultralytics
+        print(f"  [1] import: OK (v{ultralytics.__version__})")
+    except ImportError as e:
+        print(f"  [1] import: FAIL - {e}")
+        print(f"      → pip install ultralytics")
+        return False
+
+    # 2. 모델 로드 (자동 다운로드)
+    try:
+        from pose_models import YOLOv8Pose
+        model = YOLOv8Pose(model_size="n", yolo_version="v11")
+        print(f"  [2] 모델 로드 중 (yolo11n-pose.pt 다운로드 포함)...")
+        model.load()
+        print(f"  [2] 모델 로드: OK")
+    except Exception as e:
+        print(f"  [2] 모델 로드: FAIL - {e}")
+        return False
+
+    # 3. 추론
+    try:
+        img = create_test_image()
+        result = model.predict_with_timing(img)
+        print(f"  [3] 추론: OK ({result.inference_time_ms:.1f}ms)")
+        print(f"      detected={result.detected}, "
+              f"keypoints={len(result.keypoints_2d)}")
+    except Exception as e:
+        print(f"  [3] 추론: FAIL - {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+    print(f"  ✓ YOLO11-Pose 정상 동작!")
+    return True
+
+
 def verify_rtmpose():
     """RTMPose (rtmlib) 동작 확인"""
     print("\n--- RTMPose (rtmlib) ---")
@@ -230,6 +272,65 @@ def verify_rtmpose_wholebody():
     return True
 
 
+def verify_movenet():
+    """MoveNet (TFLite) 동작 확인"""
+    print("\n--- MoveNet (TFLite) ---")
+
+    # 1. import 확인
+    tflite_ok = False
+    try:
+        from tflite_runtime.interpreter import Interpreter
+        print(f"  [1] tflite_runtime import: OK")
+        tflite_ok = True
+    except ImportError:
+        try:
+            from tensorflow.lite.python.interpreter import Interpreter
+            print(f"  [1] tensorflow.lite import: OK")
+            tflite_ok = True
+        except ImportError:
+            print(f"  [1] import: FAIL - tflite-runtime/tensorflow 미설치")
+            print(f"      → pip install tflite-runtime")
+
+    if not tflite_ok:
+        return False
+
+    # 2. 모델 파일 확인
+    model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+    lightning_path = os.path.join(model_dir, "movenet_lightning.tflite")
+    thunder_path = os.path.join(model_dir, "movenet_thunder.tflite")
+
+    if os.path.exists(lightning_path):
+        print(f"  [2] Lightning 모델: OK ({lightning_path})")
+    else:
+        print(f"  [2] Lightning 모델: 없음 (python3 download_movenet.py)")
+        return False
+
+    if os.path.exists(thunder_path):
+        print(f"  [2] Thunder 모델: OK ({thunder_path})")
+    else:
+        print(f"  [2] Thunder 모델: 없음 (python3 download_movenet.py)")
+        # Lightning만 있어도 계속 진행
+
+    # 3. 추론 테스트
+    try:
+        from pose_models import MoveNetModel
+        model = MoveNetModel(variant="lightning")
+        model.load()
+        print(f"  [3] 모델 로드: OK")
+
+        img = create_test_image()
+        result = model.predict_with_timing(img)
+        print(f"  [4] 추론: OK ({result.inference_time_ms:.1f}ms)")
+        print(f"      detected={result.detected}, "
+              f"keypoints={len(result.keypoints_2d)}")
+    except Exception as e:
+        print(f"  [3] 추론: FAIL - {e}")
+        return False
+
+    print(f"  ✓ MoveNet 정상 동작!")
+    return True
+
+
 def verify_zed_bt():
     """ZED Body Tracking 동작 확인"""
     print("\n--- ZED Body Tracking ---")
@@ -340,8 +441,10 @@ def main():
     results = {}
     results["MediaPipe"] = verify_mediapipe()
     results["YOLOv8-Pose"] = verify_yolov8()
+    results["YOLO11-Pose"] = verify_yolo11()
     results["RTMPose"] = verify_rtmpose()
     results["RTMPose Wholebody"] = verify_rtmpose_wholebody()
+    results["MoveNet"] = verify_movenet()
     results["ZED BT"] = verify_zed_bt()
 
     # 결과 요약

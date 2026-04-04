@@ -90,32 +90,76 @@ echo ""
 
 # ---- 5. Jetson ONNX Runtime GPU ----
 echo "[5/7] ONNX Runtime GPU 설치..."
-if python3 -c "import onnxruntime as ort; assert 'CUDAExecutionProvider' in ort.get_available_providers()" 2>/dev/null; then
-    echo "  ✓ onnxruntime-gpu $(python3 -c 'import onnxruntime; print(onnxruntime.__version__)') CUDA 이미 OK"
-else
-    pip uninstall onnxruntime onnxruntime-gpu -y --quiet 2>/dev/null || true
+echo ""
+echo "  ⚠ 중요: onnxruntime-gpu는 RTMPose GPU 추론에 필수입니다!"
+echo "    CPU 전용 onnxruntime으로는 RTMPose가 ~10 FPS (CPU fallback)로 동작합니다."
+echo "    GPU 빌드를 설치하면 TensorRT/CUDA EP를 사용하여 ~40+ FPS가 가능합니다."
+echo ""
 
-    ORT_OK=false
-    for INDEX_URL in \
-        "https://pypi.jetson-ai-lab.io/jp6/cu126" \
-        "https://pypi.jetson-ai-lab.io/jp6/cu129" \
-    ; do
-        echo "  시도: ${INDEX_URL}..."
-        if pip install onnxruntime-gpu \
-            --index-url "${INDEX_URL}" \
-            --no-cache-dir 2>/dev/null; then
-            ORT_OK=true
-            break
-        fi
-    done
+# 먼저 기존 CPU 전용 onnxruntime 강제 제거 (ultralytics/rtmlib가 설치한 것 포함)
+pip uninstall onnxruntime onnxruntime-gpu -y --quiet 2>/dev/null || true
 
-    if [ "$ORT_OK" = false ]; then
-        echo "  ⚠ GPU 실패 → CPU 버전으로 대체"
-        pip install onnxruntime --quiet 2>/dev/null
+ORT_OK=false
+for INDEX_URL in \
+    "https://pypi.jetson-ai-lab.io/jp6/cu126" \
+    "https://pypi.jetson-ai-lab.io/jp6/cu129" \
+; do
+    echo "  시도: ${INDEX_URL}..."
+    if pip install onnxruntime-gpu \
+        --index-url "${INDEX_URL}" \
+        --no-cache-dir 2>/dev/null; then
+        ORT_OK=true
+        break
     fi
+done
 
-    PROV=$(python3 -c "import onnxruntime as ort; print('CUDA' if 'CUDAExecutionProvider' in ort.get_available_providers() else 'CPU')" 2>/dev/null || echo "?")
-    echo "  ✓ onnxruntime $(python3 -c 'import onnxruntime; print(onnxruntime.__version__)' 2>/dev/null) (${PROV})"
+if [ "$ORT_OK" = false ]; then
+    echo ""
+    echo "  ✗ onnxruntime-gpu 설치 실패!"
+    echo "    RTMPose가 CPU에서만 동작합니다 (매우 느림)."
+    echo ""
+    echo "    수동 설치 방법:"
+    echo "      pip uninstall onnxruntime onnxruntime-gpu -y"
+    echo "      pip install onnxruntime-gpu --index-url https://pypi.jetson-ai-lab.io/jp6/cu126 --no-cache-dir"
+    echo ""
+    echo "    그래도 실패 시 NVIDIA 포럼에서 Jetson용 .whl 파일을 직접 다운로드하세요:"
+    echo "      https://elinux.org/Jetson_Zoo#ONNX_Runtime"
+    echo ""
+    echo "  ⚠ GPU 실패 → CPU 버전으로 임시 대체 (RTMPose 성능 저하)"
+    pip install onnxruntime --quiet 2>/dev/null
+fi
+
+# GPU provider 검증
+echo ""
+echo "  [검증] ONNX Runtime provider 확인..."
+PROV_LIST=$(python3 -c "
+import onnxruntime as ort
+provs = ort.get_available_providers()
+print(' / '.join(provs))
+has_trt = 'TensorrtExecutionProvider' in provs
+has_cuda = 'CUDAExecutionProvider' in provs
+if has_trt:
+    print('STATUS:GPU_TRT')
+elif has_cuda:
+    print('STATUS:GPU_CUDA')
+else:
+    print('STATUS:CPU_ONLY')
+" 2>/dev/null || echo "STATUS:ERROR")
+
+if echo "$PROV_LIST" | grep -q "STATUS:GPU_TRT"; then
+    echo "  ✓ onnxruntime-gpu $(python3 -c 'import onnxruntime; print(onnxruntime.__version__)' 2>/dev/null) (TensorRT + CUDA)"
+    echo "    RTMPose GPU 추론 가능!"
+elif echo "$PROV_LIST" | grep -q "STATUS:GPU_CUDA"; then
+    echo "  ✓ onnxruntime-gpu $(python3 -c 'import onnxruntime; print(onnxruntime.__version__)' 2>/dev/null) (CUDA only, TRT 없음)"
+    echo "    RTMPose GPU 추론 가능 (CUDA fallback)"
+else
+    echo "  ✗ onnxruntime $(python3 -c 'import onnxruntime; print(onnxruntime.__version__)' 2>/dev/null) (CPU 전용!)"
+    echo ""
+    echo "  ╔══════════════════════════════════════════════════════════════╗"
+    echo "  ║  경고: RTMPose가 CPU에서만 동작합니다!                       ║"
+    echo "  ║  벤치마크에서 RTMPose ~10 FPS로 측정됩니다.                   ║"
+    echo "  ║  onnxruntime-gpu Jetson 빌드를 설치해야 GPU 사용 가능합니다.  ║"
+    echo "  ╚══════════════════════════════════════════════════════════════╝"
 fi
 echo ""
 
@@ -184,8 +228,14 @@ except: pkgs["ultralytics"] = "✗"
 try:
     import onnxruntime as ort
     provs = ort.get_available_providers()
-    gpu = "CUDA" if "CUDAExecutionProvider" in provs else "CPU"
-    pkgs["onnxruntime"] = f"✓ {ort.__version__} ({gpu})"
+    has_trt = "TensorrtExecutionProvider" in provs
+    has_cuda = "CUDAExecutionProvider" in provs
+    if has_trt:
+        pkgs["onnxruntime"] = f"✓ {ort.__version__} (TensorRT+CUDA) ← RTMPose GPU OK"
+    elif has_cuda:
+        pkgs["onnxruntime"] = f"✓ {ort.__version__} (CUDA) ← RTMPose GPU OK"
+    else:
+        pkgs["onnxruntime"] = f"✗ {ort.__version__} (CPU 전용!) ← RTMPose GPU 불가!"
 except: pkgs["onnxruntime"] = "✗"
 
 try:
