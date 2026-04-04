@@ -43,12 +43,12 @@ FOOT_LABELS = {
 }
 
 FOOT_COLORS = {
-    17: (0, 255, 0),    # green
-    18: (0, 200, 0),
-    19: (0, 150, 0),
-    20: (255, 0, 0),    # blue (BGR)
-    21: (200, 0, 0),
-    22: (150, 0, 0),
+    17: (0, 255, 0),    # green - left
+    18: (0, 220, 0),    # green variant - left small toe
+    19: (0, 150, 0),    # dark green - left heel
+    20: (255, 0, 0),    # blue (BGR) - right
+    21: (220, 0, 0),    # blue variant - right small toe
+    22: (150, 0, 0),    # dark blue - right heel
 }
 
 BODY_LABELS = {

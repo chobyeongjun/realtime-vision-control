@@ -35,11 +35,23 @@ MODEL_CONFIGS = {
     "yolov8_trt": [
         {"key": "yolov8", "label": "YOLOv8n/s TensorRT", "tensorrt": True},
     ],
+    "yolo26": [
+        {"key": "yolo26", "label": "YOLO26n/s PyTorch", "tensorrt": False},
+    ],
+    "yolo26_trt": [
+        {"key": "yolo26", "label": "YOLO26n/s TensorRT", "tensorrt": True},
+    ],
     "rtmpose": [
         {"key": "rtmpose", "label": "RTMPose Lite/Balanced"},
     ],
     "rtmpose_wb": [
         {"key": "rtmpose_wb", "label": "RTMPose Wholebody Lite/Balanced"},
+    ],
+    "movenet": [
+        {"key": "movenet", "label": "MoveNet Lightning/Thunder TFLite"},
+    ],
+    "movenet_trt": [
+        {"key": "movenet_trt", "label": "MoveNet Lightning/Thunder TRT"},
     ],
     "zed_bt": [
         {"key": "zed_bt", "label": "ZED Body Tracking Fast"},
@@ -94,7 +106,7 @@ def main():
     parser.add_argument("--no-zed", dest="use_zed", action="store_false",
                         help="ZED 없이 웹캠 사용")
     parser.add_argument("--resolution", default="SVGA")
-    parser.add_argument("--camera-fps", type=int, default=60)
+    parser.add_argument("--camera-fps", type=int, default=120)
     parser.add_argument("--video", type=str, default=None,
                         help="동영상 파일 (카메라 대신)")
     parser.add_argument("--no-analysis", action="store_true",

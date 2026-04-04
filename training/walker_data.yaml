@@ -1,0 +1,19 @@
+# 2차 Fine-Tuning: 워커 실제 보행 데이터
+# 1차 모델(COCO)로 자동 라벨링한 워커 ZED 영상 데이터
+#
+# 사용법:
+#   python training/train_lower_body.py \
+#       --model models/yolo26s-lower6.pt \
+#       --data training/walker_data.yaml \
+#       --name lower_body_v2_walker
+
+path: ./data/walker
+train: train/images
+val: val/images
+
+kpt_shape: [6, 3]
+
+names:
+  0: lower_body
+
+flip_idx: [1, 0, 3, 2, 5, 4]

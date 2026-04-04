@@ -27,7 +27,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def record_svo2(output_path, duration, resolution="SVGA", fps=60, preview=False):
+def record_svo2(output_path, duration, resolution="SVGA", fps=120, preview=False):
     """ZED SVO2 녹화 (depth 포함)"""
     try:
         import pyzed.sl as sl
@@ -48,7 +48,7 @@ def record_svo2(output_path, duration, resolution="SVGA", fps=60, preview=False)
     }
     init.camera_resolution = res_map.get(resolution, sl.RESOLUTION.SVGA)
     init.camera_fps = fps
-    init.depth_mode = sl.DEPTH_MODE.NEURAL
+    init.depth_mode = sl.DEPTH_MODE.PERFORMANCE
     init.coordinate_units = sl.UNIT.METER
 
     err = zed.open(init)
@@ -129,7 +129,7 @@ def record_svo2(output_path, duration, resolution="SVGA", fps=60, preview=False)
     return True
 
 
-def record_mp4(output_path, duration, resolution="SVGA", fps=60, preview=False):
+def record_mp4(output_path, duration, resolution="SVGA", fps=120, preview=False):
     """ZED RGB를 MP4로 녹화 (depth 없음, 가볍고 범용)"""
     try:
         import pyzed.sl as sl
@@ -272,7 +272,7 @@ def main():
                         help="녹화 시간 (초, 기본: 30)")
     parser.add_argument("--resolution", default="SVGA",
                         choices=["SVGA", "HD720", "HD1080", "HD1200"])
-    parser.add_argument("--fps", type=int, default=60)
+    parser.add_argument("--fps", type=int, default=120)
     parser.add_argument("--preview", action="store_true",
                         help="실시간 미리보기")
     parser.add_argument("--convert", type=str,

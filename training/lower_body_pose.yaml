@@ -1,0 +1,27 @@
+# 하체 전용 6-Keypoint Pose Estimation 데이터셋 설정
+# YOLO26s-pose Fine-Tuning용
+#
+# Keypoints:
+#   0: left_hip      1: right_hip
+#   2: left_knee     3: right_knee
+#   4: left_ankle    5: right_ankle
+#
+# 사용법:
+#   python train_lower_body.py --data lower_body_pose.yaml
+
+path: ./data/lower_body
+train: train/images
+val: val/images
+
+# 6 keypoints, 각각 (x, y, visibility)
+kpt_shape: [6, 3]
+
+# 단일 클래스: 하체 (lower_body)
+names:
+  0: lower_body
+
+# 좌우 대칭 매핑 (fliplr 증강용)
+# left_hip(0) ↔ right_hip(1)
+# left_knee(2) ↔ right_knee(3)
+# left_ankle(4) ↔ right_ankle(5)
+flip_idx: [1, 0, 3, 2, 5, 4]
