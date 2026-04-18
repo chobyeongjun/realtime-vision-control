@@ -12,14 +12,14 @@
 ```bash
 # 1) 최신 코드 가져오기
 cd ~/RealTime_Pose_Estimation
-git pull origin <현재-브랜치-이름>
+git pull origin main
 
 # 2) 변경된 파일 목록 확인
 git log --oneline -3
 
 # 3) 실행 (변경된 스크립트에 따라)
 source venv/bin/activate
-python3 benchmarks/<실행할-스크립트>.py
+python3 src/benchmarks/<실행할-스크립트>.py
 ```
 
 **매번 빠짐없이** git pull 명령어부터 실행 명령어까지 전체 과정을 안내하세요.
