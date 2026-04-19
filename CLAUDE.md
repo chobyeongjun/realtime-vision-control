@@ -22,3 +22,33 @@
 ## 세션 시작 시
 1. 관련 Wiki 노트 확인 (admittance-control, ak60-motor 등)
 2. 최근 실험 확인: ~/research-vault/realtime-vision-control/experiments/
+
+## 실험 저장 규칙 (자동화)
+
+실험 코드 실행이 완료되면 반드시:
+
+```bash
+# 1. /tmp/exp_config.json 먼저 작성
+cat > /tmp/exp_config.json << 'JSON'
+{
+  "name": "experiment_name_snake_case",
+  "hypothesis": "이 실험이 검증하려는 것 1문장",
+  "method": "사용한 알고리즘/방법",
+  "parameters": {"camera": "ZED X Mini", "control": "impedance"},
+  "key_metrics": {"latency_ms": 0.0, "accuracy_pct": 0},
+  "status": "success",
+  "limitations": "발견된 한계점",
+  "next_experiment": "다음 실험 방향"
+}
+JSON
+
+# 2. 세션 종료 시 Stop hook이 자동으로 save_experiment.py 실행
+# → ~/research-vault/realtime-vision-control/experiments/ 에 저장
+```
+
+**수동 실행:** `python3 ~/.scripts/save_experiment.py --config /tmp/exp_config.json`
+
+### 그래프 규칙
+- PNG (DPI 150) + PDF (벡터) 두 형식으로 저장
+- 축 레이블 단위 필수: `Time [s]`, `Latency [ms]`, `Error [px]`
+- proposed=`#2196F3`, baseline=`#F44336`

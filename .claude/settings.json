@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "test -f /tmp/exp_config.json && python3 ~/.scripts/save_experiment.py --config /tmp/exp_config.json && rm -f /tmp/exp_config.json; true"
+          }
+        ]
+      }
+    ]
+  }
+}
