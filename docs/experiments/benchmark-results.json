@@ -1,0 +1,213 @@
+{
+  "project": "realtime-vision-control",
+  "topic": "Real-time pose estimation + cable-driven impedance control for H-Walker",
+  "updated": "2026-04-19",
+
+  "hardware": {
+    "sbc": "Jetson Orin NX 16GB (JetPack 6.x, MAXN + jetson_clocks, GPU 918MHz locked)",
+    "camera": "ZED X Mini (GMSL2, SVGA 960x600 @ 120fps, Global Shutter, PERFORMANCE depth)",
+    "mcu": "Teensy 4.1 (inner loop 111Hz)",
+    "motor": "AK60 via CAN (max cable force 70N)",
+    "inference": "TensorRT FP16"
+  },
+
+  "benchmarks": {
+    "2026-03-24_model_comparison": {
+      "date": "2026-03-24",
+      "purpose": "6 pose model baseline comparison on Jetson Orin NX",
+      "conditions": {
+        "duration_s": 15,
+        "precision": "FP16",
+        "imgsz": 640,
+        "depth_mode": "PERFORMANCE",
+        "camera": "ZED X Mini SVGA 960x600 @120fps"
+      },
+      "metric_definition": "E2E = capture + preprocess + inference + postprocess, measured as wall-clock per frame",
+      "target_latency_ms": 50,
+      "results": [
+        { "model": "YOLOv8n-Pose",        "fps": 27.7, "e2e_mean_ms": 35.7, "e2e_p95_ms": 38.2,  "detect_rate": 1.000, "confidence": 0.97, "under_50ms_rate": 1.000 },
+        { "model": "YOLOv8s-Pose",        "fps": 25.1, "e2e_mean_ms": 39.5, "e2e_p95_ms": 43.4,  "detect_rate": 1.000, "confidence": 0.99, "under_50ms_rate": 1.000 },
+        { "model": "YOLO11s-Pose",        "fps": 24.5, "e2e_mean_ms": 40.4, "e2e_p95_ms": 43.2,  "detect_rate": 1.000, "confidence": 0.99, "under_50ms_rate": 0.997 },
+        { "model": "YOLO26s-Pose",        "fps": 22.3, "e2e_mean_ms": 44.4, "e2e_p95_ms": 47.5,  "detect_rate": 1.000, "confidence": 0.99, "under_50ms_rate": 0.994, "note": "17 keypoints baseline (pre fine-tune)" },
+        { "model": "MediaPipe-BlazePose", "fps": 15.5, "e2e_mean_ms": 63.6, "e2e_p95_ms": 71.1,  "detect_rate": 0.944, "confidence": 0.77, "under_50ms_rate": 0.000 },
+        { "model": "RTMPose-lightweight", "fps":  6.6, "e2e_mean_ms": 150.5,"e2e_p95_ms": 177.7, "detect_rate": 1.000, "confidence": 0.60, "under_50ms_rate": 0.000, "note": "CPU fallback (CUDA EP not enabled on Jetson build)" }
+      ],
+      "key_takeaway": "Only YOLO family (n/s/11/26) meets 50ms target. YOLO26s chosen as base for fine-tuning — highest confidence while still in budget."
+    },
+
+    "2026-03-27_fine_tuned_lower6": {
+      "date": "2026-03-27",
+      "purpose": "Fine-tune YOLO26s 17kpt → lower body 6kpt only (L/R hip, knee, ankle)",
+      "model_output": "yolo26s-lower6 (v1) → yolo26s-lower6-v2",
+      "training": {
+        "hardware": "RTX 5090",
+        "dataset": "COCO 2017, 82K samples",
+        "epochs": "352 (EarlyStopping best at 302)",
+        "pose_mAP50": 0.885
+      },
+      "comparison": {
+        "baseline_17kpt": { "e2e_mean_ms": 44, "confidence": 0.97, "mAP50": null },
+        "finetuned_6kpt": { "e2e_mean_ms": 18, "confidence": 0.99, "mAP50": 0.885, "speedup_vs_baseline": 2.44 }
+      },
+      "caveats": [
+        "p95 for 6kpt row was not recorded; paper-quality comparison needs re-measurement under identical 15s protocol",
+        "44ms baseline is consistent with 3/24 YOLO26s E2E (44.4ms) within measurement noise"
+      ],
+      "attributed_gains": [
+        "Head size reduction (17kpt → 6kpt) → lower postprocess cost",
+        "Smaller output tensor → fewer argmax/scatter ops on GPU → predict time drop"
+      ]
+    },
+
+    "2026-04-15_pipeline_integration": {
+      "date": "2026-04-15",
+      "purpose": "Full pipeline with PipelinedCamera + DirectTRT + C++ postprocess pybind11",
+      "model": "yolo26s-lower6-v2 (DirectTRT, bypasses Ultralytics)",
+      "results": [
+        { "variant": "verify_geometry --no-display",
+          "fetch_ms": 0.0, "predict_ms": 13.7, "post_2d_to_3d_ms": 2.0, "total_ms": 16.4, "fps": 61 },
+        { "variant": "pipeline_main --no-display (Safety/KF removed)",
+          "fetch_ms": 5.7, "predict_ms": 9.3, "depth_3d_ms": 2.1, "shm_ms": 0.5, "total_ms": 17.7, "fps": 56 }
+      ],
+      "key_optimizations": [
+        "PipelinedCamera Double Buffer + Event (grab hidden behind predict)",
+        "DirectTRT path skips Ultralytics (saves ~3ms)",
+        "GPU output parsing: top-1 conf only (18 floats copied instead of 7200)",
+        "BGRA pass-through (1 color conversion instead of 2)",
+        "pybind11 C++ post (10ms → 2ms)"
+      ]
+    },
+
+    "2026-04-17_python_only_peak": {
+      "date": "2026-04-17",
+      "purpose": "PipelinedCamera redesign: ready_rgb / ready_depth split → fetch 0ms full time",
+      "model": "yolo26s-lower6-v2 DirectTRT",
+      "world_frame_method": "B (IMU quaternion N=20 average → static R, skip_imu=True)",
+      "results": {
+        "python_only": {
+          "fetch_ms": 0.0, "predict_ms": 13.5, "depth_3d_ms": 0.3, "shm_ms": 0.5,
+          "total_ms": 13.7, "fps": 73,
+          "e2e_lat_mean_ms": 13.8, "e2e_lat_std_ms": 1.8, "e2e_lat_max_ms": 22
+        },
+        "python_plus_cpp_control": {
+          "predict_ms_range": [12.8, 14.0],
+          "total_ms": 14.6, "fps": 67,
+          "delta_vs_python_only_hz": -3,
+          "note": "Slight CPU contention — mitigated via isolation: Python cores 2-5, C++ 6-7, system 0-1"
+        }
+      }
+    },
+
+    "2026-04-18_cuda_stream_hard_limit": {
+      "date": "2026-04-18",
+      "purpose": "CUDA_Stream 3-stage pipeline + 20ms HARD LIMIT to engineer-out stale-keypoint risk to the motor",
+      "model": "yolo26s-lower6-v2.engine (TRT FP16, imgsz=640)",
+      "conditions": {
+        "duration_s": 300,
+        "method": "B",
+        "cpu_affinity": "Python 2-5, C++ 6-7, system 0-1",
+        "rt_scheduler": "SCHED_FIFO priority 90 (chrt -r 90 via launch_clean.sh)",
+        "gc": "disabled",
+        "launcher": "launch_clean.sh — sudo wrapper: pkill + rm /dev/shm/sem.ipc_test_* + systemctl restart nvargus-daemon + jetson_clocks + exec chrt -r 90 sudo -u user"
+      },
+      "results": {
+        "e2e_latency_mean_ms": 13.8,
+        "e2e_latency_p99_ms": 19.8,
+        "hard_limit_ms": 20,
+        "hard_limit_violation_rate": 0.00031,
+        "violation_frames_reaching_motor": 0,
+        "fps_range": [67, 73]
+      },
+      "safety_architecture": {
+        "frame_skip_pattern": "if e2e > 20ms → publish_valid=False → C++ control loop sees invalid, skips that frame",
+        "shm_protocol": "POSIX /hwalker_pose_cuda with seqlock pattern",
+        "watchdog_fallback": "C++ 0.2s stale → pretension 5N safe state",
+        "estop_sentinel": "/dev/shm/hwalker_pose_cuda_estop file on sustained unhealth",
+        "five_layer_force_clamp": "C++ side final clamp to 70N even if upstream wrong"
+      },
+      "failure_modes_observed_and_solved": [
+        "Argus IPC file accumulation (/dev/shm/sem.ipc_test_*) across restarts → 60%+ violation rate in re-runs. Solved by launch_clean.sh sudo wrapper",
+        "sudo chrt directly → torch ModuleNotFoundError (root env). Solved by exec chrt -r 90 sudo -u user -H env PYTHONPATH=... (RT priority inherited across uid switch)",
+        "Manual --camera-pitch-deg override had wrong sign → replaced with IMU quaternion fusion from get_pose().get_orientation()"
+      ]
+    }
+  },
+
+  "evolution_summary": [
+    { "stage": "baseline",            "date": "2026-03-24", "e2e_ms": 44.4, "fps": 22.3, "note": "YOLO26s 17kpt" },
+    { "stage": "fine-tuned-6kpt",     "date": "2026-03-27", "e2e_ms": 18.0, "fps": 55,   "note": "yolo26s-lower6, mAP50 88.5%" },
+    { "stage": "pipeline-integrated", "date": "2026-04-15", "e2e_ms": 16.4, "fps": 61,   "note": "PipelinedCamera + DirectTRT + C++ post" },
+    { "stage": "python-only-peak",    "date": "2026-04-17", "e2e_ms": 13.7, "fps": 73,   "note": "ready_rgb/depth split, fetch 0ms, Method B static R" },
+    { "stage": "python-plus-cpp",     "date": "2026-04-17", "e2e_ms": 14.6, "fps": 67,   "note": "With C++ control loop, CPU isolation" },
+    { "stage": "hard-limit-guarantee","date": "2026-04-18", "e2e_ms_mean": 13.8, "e2e_ms_p99": 19.8, "violation_rate_20ms": 0.00031, "note": "CUDA_Stream + frame-skip. 0 violations reach motor." }
+  ],
+
+  "total_speedup": {
+    "baseline_to_final_mean": { "from_ms": 44.4, "to_ms": 13.7, "factor": 3.24 },
+    "fine_tune_contribution": { "from_ms": 44.4, "to_ms": 18.0, "factor": 2.47, "attributed_to": "17kpt → 6kpt head + retrained backbone" },
+    "pipeline_contribution":  { "from_ms": 18.0, "to_ms": 13.7, "factor": 1.31, "attributed_to": "PipelinedCamera, DirectTRT, C++ postprocess, CPU isolation" }
+  },
+
+  "safety_guarantees": {
+    "hard_limit_ms": 20,
+    "violation_rate_measured": 0.00031,
+    "duration_measured_s": 300,
+    "violation_frames_reach_actuator": 0,
+    "method": "frame-skip via valid=False flag in SHM",
+    "defense_in_depth": [
+      "Python: GC disabled + SCHED_FIFO 90 + taskset 2-5",
+      "Python: 20ms frame-skip marks valid=False",
+      "C++: watchdog 0.2s fallback to pretension 5N",
+      "C++: 5-layer force clamp (final max 70N)",
+      "System: launch_clean.sh restores clean Argus state on each run"
+    ]
+  },
+
+  "papers": {
+    "paper1": {
+      "id": "realtime-vision-control-vision-impedance-ral-2026",
+      "title": "Vision-Based Impedance Control for Cable-Driven Gait Rehabilitation",
+      "target_venue": "IEEE RA-L",
+      "completion_pct": 15,
+      "contributions_draft": [
+        "14ms/73Hz real-time pose estimation on Jetson Orin NX via pipelined camera + DirectTRT",
+        "Method B IMU world frame with static R — camera placement-free gait coordinates",
+        "20ms HARD LIMIT frame-skip pattern for stale-keypoint safety (0.031% violation over 300s, zero reach motor)",
+        "POSIX SHM seqlock + C++ watchdog 0.2s safe fallback"
+      ]
+    },
+    "paper2": {
+      "id": "realtime-vision-control-rl-sim2real",
+      "title": "RL Sim-to-Real Policy for Gait Assistance",
+      "target_venue": "TBD",
+      "completion_pct": 0,
+      "status": "Planning — reuses Paper 1 perception pipeline"
+    }
+  },
+
+  "open_questions_for_next_meeting": [
+    "3/27 18ms 수치의 p95/std 재측정 (15s, identical protocol, FP16, imgsz 640)",
+    "Method B knee_err 좌우 비대칭 원인 규명 (C++ [-175, -152] vs Python [sym] thigh |L-R|=1cm)",
+    "Teensy 실제 모터 구동 테스트 (pretension 5N까지만 완료)",
+    "MediaPipe / OpenPose 재측정 여부 (논문 related work baseline)",
+    "Method B neutral 자동 설정 or hybrid Method A+B 전환",
+    "Clinical population IRB 및 protocol 착수 시점"
+  ],
+
+  "meta": {
+    "data_sources": [
+      "docs/evolution/perception-evolution.md",
+      "docs/handovers/2026-04-15-perception-pipeline-teensy.md",
+      "docs/handovers/2026-04-17-perception-pipeline-wrap-up.md (referred as 04-18-wrap-up in vault)",
+      "docs/handovers/2026-04-18-p0-track-completion-report.md",
+      "docs/handovers/2026-04-19-handover-cuda-stream-perception.md",
+      "README.md (3/24-3/27 benchmark rows)"
+    ],
+    "intended_use": [
+      "Input for meeting PPT generation (docs/meetings/YYYY-MM-DD-advisor.md)",
+      "Source of truth for Paper 1 Results section",
+      "Quick-reference for performance regression checks"
+    ],
+    "maintenance": "Update this JSON whenever a new benchmark row is added. Keep evolution_summary monotonically ordered."
+  }
+}
