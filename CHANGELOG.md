@@ -5,6 +5,51 @@
 
 ---
 
+## [2026-04-21] v0.1.0 — CUDA_Stream Stable Baseline ⭐
+
+**Tag**: `v0.1.0-cuda-stream-stable`
+**Result**: 77.4 Hz / e2e p99 14.46ms / **HARD LIMIT 위반 0.000%** (180s, 13872 frames)
+**Beats 4/18 baseline (73 Hz / p99 19.8 / 0.031%) on every metric.**
+
+### 적용된 핵심 fix (이번 milestone에 묶인 commits)
+
+| commit | 변경 | 효과 |
+|---|---|---|
+| `541cb39` | Graph capture retry + thread_local mode | reproducibility 시도 |
+| `8246061` | **Watchdog pause during graph capture** | TRUE root cause — graph 비결정성의 진짜 원인은 watchdog의 stream.query()가 capture를 invalidate. capture 중 watchdog pause → resume |
+| `66402fa` | view_sagittal 재작성 (mainline 스타일) | 6 keypoint 항상 표시 + sticky display |
+| `201497b` | gpu_postprocess: 3D EMA (alpha 0.7) | 떨림 smoothing |
+| `039f46c` | gpu_postprocess: sticky publish (max 5 frames ≈ 60ms) | detection 누락 시 last good 유지 |
+| `c95c60f` | view_sagittal: walking-direction auto-calibration + warmup 30→100 | 옆모습 정확 + transient 통계 제외 |
+| `e7e2af3` | bone-constraint + velocity-bound 활성화 | outlier 좌표 reject (EMA는 smoothing이지 outlier 잡지 못함 — 사용자 지적) |
+| `ec1b85a` | velocity bound 5 → 8 m/s | 빠른 동작 (다리 들기) 수용 |
+| `ef01660` | docs: 2026-04-21 stable baseline | milestone 문서화 |
+| `833dc97` | data: import Jetson benchmark results + figures + key demo videos | 흩어진 자료 통합 |
+| `3e27fb5` | chore: structure cleanup | docs/cuda-stream/ + 빈 placeholder 제거 |
+
+### 안전 chain (활성)
+1. **20ms HARD LIMIT** → 위반 시 `valid=False` publish → C++ skip
+2. **Bone length constraint** → 비정상 좌표 reject
+3. **Joint velocity bound** (8 m/s) → teleportation reject
+4. **Sticky publish** (max 5 frames) → 짧은 detection 손실 흡수
+5. **C++ watchdog 0.2s** → SHM stale → pretension 5N
+6. **C++ 5중 force clamp** → max 70N (AK60 한계)
+7. **Estop sentinel** → watchdog unhealthy 시 즉시 0N
+
+### 데이터 자산 (이번에 통합)
+- `docs/experiments/2026-03-24-model-comparison/` — 6 timestamp results.json + 8 demo videos (LFS)
+- `docs/experiments/2026-04-18-cuda-stream/data/` — 3 trace CSV
+- `docs/experiments/2026-04-21-stable-baseline/data/` — trace + C++ control loop log
+- `docs/figures/biomechanics/` — 14 gait/dynamics figures
+- `docs/recordings/` — v1/v2 skeleton demo videos (LFS)
+
+### 구조 정리
+- `src/perception/CUDA_Stream/docs/` → `docs/cuda-stream/` 이동 (코드 옆 docs를 사용자 문서로)
+- 빈 `.gitkeep` 제거 (`data/`, `CUDA_Stream/results/`)
+- `.gitignore` 강화 (`.DS_Store`, `*.pyc`, `results/`)
+
+---
+
 ## [2026-03-27] 1차 Fine-Tuning 완료 + Jetson 배포 + 2차 파이프라인 구축
 
 **브랜치**: `claude/analyze-project-results-FjIrj`
