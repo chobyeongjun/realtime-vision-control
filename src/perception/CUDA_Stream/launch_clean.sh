@@ -78,4 +78,4 @@ exec chrt -r 90 sudo -u "$ORIGINAL_USER" -H env \
         --schema lowlimb6 --resolution SVGA \
         --duration "$DURATION" \
         --bone-constraint \
-        --velocity-bound-mps 5.0
+        --velocity-bound-mps 8.0
