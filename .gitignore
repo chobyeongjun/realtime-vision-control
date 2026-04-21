@@ -13,3 +13,10 @@ int8_calib_cache/
 calib_images/
 build/
 *.egg-info/
+
+# OS / IDE
+.DS_Store
+*.pyc
+
+# Test/debug outputs (results live in docs/experiments/)
+results/
