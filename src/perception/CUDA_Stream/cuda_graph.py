@@ -35,26 +35,78 @@ class GraphedStep:
         self._captured = False
         self._capture_error: Optional[str] = None
 
-    def try_capture(self) -> bool:
-        """Warm up then capture. Returns True on success."""
-        try:
-            with torch.cuda.stream(self.stream):
-                for _ in range(self._warmup_iters):
-                    self.fn()
-                self.stream.synchronize()
+    def try_capture(self, max_retries: int = 3) -> bool:
+        """Warm up then capture. Returns True on success.
 
-                self._graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(self._graph, stream=self.stream):
-                    self.fn()
-            self._captured = True
-            LOGGER.info("CUDA graph captured on stream %s", self.stream)
-            return True
-        except Exception as err:  # pragma: no cover — device-specific
-            self._capture_error = str(err)
-            self._graph = None
-            self._captured = False
-            LOGGER.warning("CUDA graph capture failed: %s — eager fallback", err)
-            return False
+        ROOT CAUSE FIX (2026-04-21):
+          Default torch.cuda.graph() uses 'global' capture mode. ZED SDK's
+          grab() runs on its own internal stream — uncoordinated with our
+          pipeline streams. During capture, ZED grab issued a cudaCall on
+          its stream → cudaErrorStreamCaptureInvalidated → silent fallback
+          to eager → run was 40Hz instead of 80Hz, non-deterministic.
+
+        Diagnostic from Jetson trace:
+          [ZED][WARNING] [Grab] A CUDA error occurred:
+            operation not permitted when stream is capturing (900)
+          → cudaErrorStreamCaptureInvalidated
+
+        Fix:
+          1. capture_error_mode='thread_local' — only THIS thread's CUDA
+             work is tracked; ZED's other-thread streams cannot invalidate.
+          2. Retry up to max_retries — even with thread_local there can be
+             transient races (driver init, etc.).
+          3. Hard sync before each attempt — drain stale GPU work.
+          4. On total failure, raise — silent eager fallback hides bugs and
+             makes runs non-reproducible. Caller can catch if they want
+             eager fallback explicitly.
+        """
+        last_err: Optional[Exception] = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Drain everything before each attempt — GPU must be
+                # quiescent or capture picks up stray work and fails.
+                torch.cuda.synchronize()
+
+                with torch.cuda.stream(self.stream):
+                    for _ in range(self._warmup_iters):
+                        self.fn()
+                    self.stream.synchronize()
+
+                    self._graph = torch.cuda.CUDAGraph()
+                    # 'thread_local' = ZED's other-thread CUDA calls
+                    # don't invalidate this capture (root cause of err 900).
+                    with torch.cuda.graph(
+                        self._graph,
+                        stream=self.stream,
+                        capture_error_mode="thread_local",
+                    ):
+                        self.fn()
+                self._captured = True
+                if attempt > 1:
+                    LOGGER.info(
+                        "CUDA graph captured on attempt %d/%d (stream=%s)",
+                        attempt, max_retries, self.stream,
+                    )
+                else:
+                    LOGGER.info("CUDA graph captured on stream %s", self.stream)
+                return True
+            except Exception as err:
+                last_err = err
+                self._capture_error = str(err)
+                self._graph = None
+                self._captured = False
+                LOGGER.warning(
+                    "CUDA graph capture attempt %d/%d failed: %s",
+                    attempt, max_retries, err,
+                )
+        # All retries exhausted — raise so the caller sees a deterministic
+        # failure rather than a silent slow path. Reproducibility > silent fallback.
+        raise RuntimeError(
+            f"CUDA graph capture failed after {max_retries} attempts: "
+            f"{last_err}. Eager-mode silent fallback was masking this and "
+            f"causing non-reproducible runs (sometimes 80Hz, sometimes 40Hz). "
+            f"See cuda_graph.py docstring for root cause."
+        )
 
     def replay(self) -> None:
         if self._captured and self._graph is not None:

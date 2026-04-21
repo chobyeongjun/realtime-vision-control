@@ -181,17 +181,26 @@ class StreamedPosePipeline:
             self.runner.infer_async(inf_stream_ptr)
 
         graph = GraphedStep(stream=inf_bundle.stream, fn=_infer_only, warmup=2)
-        if graph.try_capture():
-            self._inf_graph = graph
-            LOGGER.info(
-                "CUDA graph capture SUCCESS — TRT inference replays in 1 launch"
+        try:
+            if graph.try_capture():
+                self._inf_graph = graph
+                LOGGER.info(
+                    "CUDA graph capture SUCCESS — TRT inference replays in 1 launch"
+                )
+        except RuntimeError as err:
+            # try_capture now raises after exhausting retries (was silent
+            # fallback before — caused non-reproducible 80Hz vs 40Hz runs).
+            # We catch here to keep correctness, but log loudly so the user
+            # knows their run is in slow eager mode (~40Hz vs 80Hz with graph).
+            LOGGER.error(
+                "CUDA graph capture FAILED after retries: %s\n"
+                "  → Pipeline running in EAGER mode (~40Hz vs 80Hz with graph).\n"
+                "  → To recover graph: 'sudo pkill -9 python3', then retry.\n"
+                "  → Root cause if 'cudaErrorStreamCaptureInvalidated': "
+                "another GPU process (often ZED other-thread) interfered.",
+                err,
             )
-        else:
-            LOGGER.warning(
-                "CUDA graph capture FAILED (%s) — eager fallback (no perf loss "
-                "in correctness, just no graph speedup)",
-                graph.capture_error,
-            )
+            self._inf_graph = None
 
     # ------------------------------------------------------------------
     # Overlapped run — the real deal
