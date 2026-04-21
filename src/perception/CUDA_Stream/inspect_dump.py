@@ -55,6 +55,10 @@ def main() -> int:
     ap.add_argument("--shank", nargs=2, type=float, metavar=("LO", "HI"),
                     default=DEFAULT_BOUNDS["shank"])
     ap.add_argument("--asym-max", type=float, default=DEFAULT_BOUNDS["asym_max"])
+    ap.add_argument("--valid-only", dest="valid_only", action="store_true",
+                    help="ignore SHM-invalid frames (where valid=False). "
+                         "Recommended — invalid frames have zero'd keypoints "
+                         "which skew every distance statistic to 0.")
     args = ap.parse_args()
 
     path = Path(args.path)
@@ -63,10 +67,10 @@ def main() -> int:
         return 2
 
     d = np.load(path, allow_pickle=True)
-    kpts_3d = d["kpts_3d"].astype(np.float64)      # (N, K, 3)
-    kpt_conf = d["kpt_conf"].astype(np.float64)    # (N, K)
-    valid = d["valid"]                             # (N,)
-    N, K, _ = kpts_3d.shape
+    kpts_3d_all = d["kpts_3d"].astype(np.float64)      # (N, K, 3)
+    kpt_conf_all = d["kpt_conf"].astype(np.float64)    # (N, K)
+    valid_all = d["valid"]                             # (N,)
+    N_all, K, _ = kpts_3d_all.shape
 
     schema = get_schema(args.schema)
     if K != schema.num_keypoints:
@@ -75,10 +79,29 @@ def main() -> int:
         return 3
     idx = {name: i for i, name in enumerate(schema.keypoints)}
 
+    # Filter to valid-only frames if requested. Invalid frames have zero'd
+    # keypoints that contaminate every distance statistic.
+    if args.valid_only:
+        mask = np.asarray(valid_all, dtype=bool)
+        kpts_3d = kpts_3d_all[mask]
+        kpt_conf = kpt_conf_all[mask]
+        valid = valid_all[mask]
+    else:
+        kpts_3d = kpts_3d_all
+        kpt_conf = kpt_conf_all
+        valid = valid_all
+    N = kpts_3d.shape[0]
+
     print(f"File       : {path}")
-    print(f"Frames     : {N}  (valid from SHM: {int(valid.sum())})")
+    print(f"Frames     : total={N_all}   valid_from_SHM={int(valid_all.sum())}"
+          f"   analysed={N}"
+          f"{'   (valid-only)' if args.valid_only else ''}")
     print(f"Keypoints  : {K}  ({', '.join(schema.keypoints)})")
     print()
+
+    if N == 0:
+        print("No frames to analyse.", file=sys.stderr)
+        return 0
 
     def dist(a: str, b: str) -> np.ndarray:
         ia, ib = idx[a], idx[b]
