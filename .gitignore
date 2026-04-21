@@ -5,6 +5,8 @@
 *.cache
 *.so
 *.o
+*.svo
+*.svo2
 __pycache__/
 venv/
 models/
@@ -20,3 +22,4 @@ build/
 
 # Test/debug outputs (results live in docs/experiments/)
 results/
+data/recordings/
