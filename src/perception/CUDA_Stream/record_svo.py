@@ -42,8 +42,9 @@ def parse_args() -> argparse.Namespace:
                     help="seconds to record (default 30)")
     ap.add_argument("--resolution", default="SVGA",
                     choices=["SVGA", "VGA", "HD720", "HD1080", "HD1200"])
-    ap.add_argument("--fps", type=int, default=120,
-                    help="camera fps (SVGA supports up to 120)")
+    ap.add_argument("--fps", type=int, default=60,
+                    help="camera fps. NVENC H264/H265 encoders on Jetson cap at "
+                         "60 fps; use LOSSLESS compression to record 120.")
     ap.add_argument("--depth-mode", dest="depth_mode", default="PERFORMANCE",
                     choices=["PERFORMANCE", "QUALITY", "ULTRA"],
                     help="NEURAL is forbidden — skiro-learnings")
@@ -58,6 +59,16 @@ def main() -> int:
 
     if args.depth_mode == "NEURAL":
         print("ERROR: NEURAL depth forbidden (skiro-learnings — 2.4x slowdown).",
+              file=sys.stderr)
+        return 1
+
+    # NVENC H264/H265 hardware encoders on Jetson support up to 60 fps only.
+    # If the user asks for more with a hardware compression mode, force
+    # LOSSLESS so the encoder isn't silently downclocked to 30 fps.
+    if args.fps > 60 and args.compression in ("H264", "H265"):
+        print(f"ERROR: NVENC {args.compression} caps at 60 fps on Jetson; "
+              f"you requested {args.fps} fps. Use --compression LOSSLESS "
+              f"(larger file, no encoder) or lower --fps to 60.",
               file=sys.stderr)
         return 1
 
