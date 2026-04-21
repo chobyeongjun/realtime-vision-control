@@ -139,6 +139,10 @@ class GpuPostprocessor:
         # means new=0.3*current + 0.7*prev: fast enough for walking
         # (5 Hz gait band) but cuts depth jitter visibly.
         self.ema_alpha: float = 0.7   # weight on PREVIOUS sample
+        # EMA is a LOW-PASS only — it smooths gradual noise but does NOT
+        # reject outlier teleportation (a 50cm jump just gets dampened to
+        # 15cm = still wrong). For outliers use bone_length / velocity
+        # constraints (constraints.py) which HARD-REJECT bad frames.
         self._ema_prev: Optional[torch.Tensor] = None  # (K, 3) on GPU
 
         # Sticky / hold-last-good state — when detection fails for a

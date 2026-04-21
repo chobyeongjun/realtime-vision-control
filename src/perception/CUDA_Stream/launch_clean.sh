@@ -76,4 +76,6 @@ exec chrt -r 90 sudo -u "$ORIGINAL_USER" -H env \
     python3 -u -m perception.CUDA_Stream.run_stream_demo \
         --engine "$ENGINE" \
         --schema lowlimb6 --resolution SVGA \
-        --duration "$DURATION"
+        --duration "$DURATION" \
+        --bone-constraint \
+        --velocity-bound-mps 5.0
