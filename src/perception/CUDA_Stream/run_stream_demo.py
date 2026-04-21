@@ -254,10 +254,6 @@ def main() -> int:
         csv_path=args.trace,
         device=device,
     )
-    pipeline = StreamedPosePipeline(
-        bridge, runner, pre, post, sm, constraints=stack, tracer=tracer
-    )
-
     # Warm up TRT — allocates workspace, loads kernels, populates CUDA
     # caches. Previously 10 iters; increased to 30 because observed
     # first real inference (frame 6) hit 69ms despite 10-iter warmup.
@@ -284,6 +280,14 @@ def main() -> int:
         fallback_cb=lambda reason: LOGGER.error("FALLBACK TRIGGERED: %s", reason),
     )
     watchdog.start()
+
+    # Pipeline AFTER watchdog so we can pass the watchdog ref. Pipeline
+    # needs to pause()/resume() the watchdog around CUDA graph capture
+    # (otherwise watchdog.tick → stream.query() → invalidates capture).
+    pipeline = StreamedPosePipeline(
+        bridge, runner, pre, post, sm,
+        constraints=stack, tracer=tracer, watchdog=watchdog,
+    )
 
     stop_flag = {"stop": False}
 
