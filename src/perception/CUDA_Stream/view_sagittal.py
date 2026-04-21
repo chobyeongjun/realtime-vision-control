@@ -72,6 +72,14 @@ def parse_args() -> argparse.Namespace:
                     help="pure: L/R keypoints overlap exactly (true sagittal, "
                          "colour-only distinction); "
                          "offset: ±leg_offset_px horizontal separation (default)")
+    ap.add_argument("--dump-file", dest="dump_file", default=None,
+                    help="replay from .npz produced by dump_shm_stream "
+                         "instead of reading live SHM. Enables Mac / laptop "
+                         "iteration without the Jetson.")
+    ap.add_argument("--no-loop", dest="loop", action="store_false",
+                    help="stop when dump ends (only with --dump-file; "
+                         "default is looping)")
+    ap.set_defaults(loop=True)
     return ap.parse_args()
 
 
@@ -132,12 +140,30 @@ def main() -> int:
     args = parse_args()
     schema = get_schema(args.schema)
 
-    try:
-        reader = ShmReader(name=args.shm, expected_k=schema.num_keypoints)
-    except FileNotFoundError:
-        print(f"SHM '/dev/shm/{args.shm}' not found. Is run_stream_demo running?",
-              file=sys.stderr)
-        return 2
+    # Two input modes: live SHM (Jetson) or replay from npz dump (any OS).
+    reader: object
+    if args.dump_file:
+        from .dump_shm_stream import DumpReader
+        try:
+            reader = DumpReader(args.dump_file,
+                                expected_k=schema.num_keypoints,
+                                loop=args.loop)
+        except FileNotFoundError:
+            print(f"dump file not found: {args.dump_file}", file=sys.stderr)
+            return 2
+        except RuntimeError as err:
+            print(f"dump file error: {err}", file=sys.stderr)
+            return 2
+        print(f"[view] replay mode — {args.dump_file} "
+              f"(K={reader.K}, frames={reader.N}, loop={reader.loop})")
+    else:
+        try:
+            reader = ShmReader(name=args.shm, expected_k=schema.num_keypoints)
+        except FileNotFoundError:
+            print(f"SHM '/dev/shm/{args.shm}' not found. Is run_stream_demo "
+                  f"running? (Or pass --dump-file for offline replay.)",
+                  file=sys.stderr)
+            return 2
 
     # Resolve skeleton indices once
     skel_idx: List[Tuple[int, int]] = []
