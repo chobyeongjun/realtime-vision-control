@@ -22,6 +22,7 @@ from typing import Deque, Optional
 import torch
 
 from .constraints import ConstraintStack
+from .cuda_graph import GraphedStep
 from .gpu_postprocess import GpuPostprocessor, PoseResult
 from .gpu_preprocess import GpuPreprocessor, LetterboxParams
 from .stream_manager import StreamManager
@@ -82,6 +83,16 @@ class StreamedPosePipeline:
         for bundle in streams.streams.values():
             bundle.record_done()
 
+        # CUDA Graph capture for TRT inference — replaces hundreds of
+        # cudaLaunchKernel calls with a single graph replay. Captured
+        # lazily after warmup so TRT JIT/tactic selection is settled.
+        # If capture fails (TRT/driver mismatch), eager fallback runs
+        # the same code path with no functional difference.
+        self._inf_graph: Optional[GraphedStep] = None
+        self._frame_count = 0
+        self._graph_warmup_frames = 30
+        self._graph_attempted = False
+
         # (Reserved for future fallback use — currently constraint rejects
         # emit zeros+valid=False instead of using stale data. Keeping this
         # as a field documented for future work; DO NOT read it elsewhere
@@ -139,6 +150,50 @@ class StreamedPosePipeline:
         )
 
     # ------------------------------------------------------------------
+    # CUDA Graph capture — one-shot after warmup
+    # ------------------------------------------------------------------
+    def _try_capture_inf_graph(self, inf_bundle) -> None:
+        """Capture the TRT inference call as a CUDA graph for cheap replay.
+
+        On Orin NX TRT 10.x ``execute_async_v3`` queues hundreds of small
+        kernels. Each cudaLaunchKernel adds ~10µs of CPU/driver overhead,
+        and ``trtexec`` shows ~2.2ms enqueue time. Replaying a captured
+        graph reduces this to a single launch (~50µs).
+
+        Capture must happen AFTER:
+          - TRT engine warmup (tactic selection)
+          - Input binding pointer is stable (we cache it now in trt_runner)
+
+        Failure path: GraphedStep falls back to eager execution. Same
+        result, same correctness — just slower.
+        """
+        if self._graph_attempted:
+            return
+        self._graph_attempted = True
+
+        inf_stream_ptr = self.sm.stream_ptr("infer")
+        # Make sure address is bound BEFORE capture; trt_runner caches
+        # so subsequent calls are no-ops, but the first call mutates
+        # context state which must happen outside the graph.
+        self.runner.bind_input_address(self._input, self.pre.out)
+
+        def _infer_only() -> None:
+            self.runner.infer_async(inf_stream_ptr)
+
+        graph = GraphedStep(stream=inf_bundle.stream, fn=_infer_only, warmup=2)
+        if graph.try_capture():
+            self._inf_graph = graph
+            LOGGER.info(
+                "CUDA graph capture SUCCESS — TRT inference replays in 1 launch"
+            )
+        else:
+            LOGGER.warning(
+                "CUDA graph capture FAILED (%s) — eager fallback (no perf loss "
+                "in correctness, just no graph speedup)",
+                graph.capture_error,
+            )
+
+    # ------------------------------------------------------------------
     # Overlapped run — the real deal
     # ------------------------------------------------------------------
     def run_overlapped_step(self) -> Optional[PipelineTick]:
@@ -147,6 +202,7 @@ class StreamedPosePipeline:
         if frame is None:
             return None
 
+        self._frame_count += 1
         cap = self.sm.bundle("capture")
         pre = self.sm.bundle("preproc")
         inf = self.sm.bundle("infer")
@@ -171,10 +227,24 @@ class StreamedPosePipeline:
 
         # --- stage B: infer (binds preproc output, waits on preproc)
         inf.wait_for(pre)
+        # bind_input_address now caches per-pointer (TRT 10.x context state
+        # mutation is expensive). Effective cost: ~0 after the first frame.
         self.runner.bind_input_address(self._input, self.pre.out)
+
+        # One-shot graph capture after warmup — settles TRT JIT first.
+        if (
+            self._frame_count == self._graph_warmup_frames
+            and self._inf_graph is None
+        ):
+            self._try_capture_inf_graph(inf)
+
         self.tracer.mark_start("inf", inf.stream)
-        with torch.cuda.stream(inf.stream):
-            self.runner.infer_async(self.sm.stream_ptr("infer"))
+        if self._inf_graph is not None and self._inf_graph.captured:
+            # Single launch — replaces hundreds of cudaLaunchKernel calls.
+            self._inf_graph.replay()
+        else:
+            with torch.cuda.stream(inf.stream):
+                self.runner.infer_async(self.sm.stream_ptr("infer"))
         self.tracer.mark_end("inf", inf.stream)
         inf.record_done()
 
