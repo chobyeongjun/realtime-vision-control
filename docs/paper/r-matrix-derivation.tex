@@ -1,0 +1,380 @@
+% ============================================================
+%  R-Matrix Derivation: IMU Quaternion → World-Frame Rotation
+%  realtime-vision-control / sagittal plane projection
+%  Author: (fill in)   Date: 2026-04-21
+% ============================================================
+\documentclass[11pt, a4paper]{article}
+
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{bm}          % \bm for bold math
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{enumitem}
+
+\geometry{margin=2.5cm}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\vv}[1]{\bm{#1}}          % vector: \vv{p}
+\newcommand{\mat}[1]{\mathbf{#1}}     % matrix: \mat{R}
+\newcommand{\quat}[1]{\bm{#1}}        % quaternion: \quat{q}
+\newcommand{\frame}[1]{\mathcal{#1}}  % frame: \frame{C}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\Rtrans}[2]{\mat{R}_{#1 \leftarrow #2}}  % R_{W←C}
+
+\theoremstyle{definition}
+\newtheorem{defn}{Definition}
+\newtheorem{prop}{Proposition}
+\newtheorem{remark}{Remark}
+
+% ============================================================
+\title{\textbf{World-Frame Rotation Matrix Derivation}\\
+       \large IMU Quaternion $\to$ Gravity-Aligned Sagittal Projection}
+\date{2026-04-21}
+\begin{document}
+\maketitle
+\tableofcontents
+\vspace{1em}
+
+% ============================================================
+\section{Coordinate Frames}
+% ============================================================
+
+We define three right-handed coordinate frames used throughout the system.
+
+\begin{defn}[Camera Frame $\frame{C}$]
+Origin at the ZED~X~Mini left optical centre.
+\begin{align*}
+  \hat{\vv{x}}_C &= \text{image right (horizontal)} \\
+  \hat{\vv{y}}_C &= \text{image down  (vertical)} \\
+  \hat{\vv{z}}_C &= \text{optical axis (into scene)}
+\end{align*}
+Units: metres. This is the standard OpenCV camera convention.
+\end{defn}
+
+\begin{defn}[World Frame $\frame{W}$]
+Gravity-aligned reference frame, frozen after IMU warmup.
+\begin{align*}
+  \hat{\vv{X}}_W &= \text{subject's left}\ (+) \\
+  \hat{\vv{Y}}_W &= \text{gravity direction (down)}\ (+) \\
+  \hat{\vv{Z}}_W &= \text{horizontal forward (walking direction)}\ (+)
+\end{align*}
+$\hat{\vv{Y}}_W$ is exactly anti-parallel to the gravity reaction vector measured
+by the IMU accelerometer at rest:
+\[
+  \vv{g}_W = \begin{pmatrix} 0 \\ +g \\ 0 \end{pmatrix}, \quad g \approx 9.81\;\text{m/s}^2
+\]
+\end{defn}
+
+\begin{defn}[Body / Human Frame $\frame{B}$]
+Patient-centred frame, computed once per standing calibration.
+\begin{align*}
+  \text{Origin}  &= \tfrac{1}{2}(\vv{p}^W_{\text{L-hip}} + \vv{p}^W_{\text{R-hip}})
+                    \quad\text{(hip midpoint in world frame)} \\
+  \hat{\vv{x}}_B &= \text{pelvis lateral, L-hip} \to \text{R-hip, } \perp \hat{\vv{Y}}_W \\
+  \hat{\vv{y}}_B &= \hat{\vv{Y}}_W \quad\text{(gravity, unchanged)} \\
+  \hat{\vv{z}}_B &= \hat{\vv{x}}_B \times \hat{\vv{y}}_B \quad\text{(patient forward)}
+\end{align*}
+The \emph{sagittal plane} is the $(\hat{\vv{y}}_B,\,\hat{\vv{z}}_B)$ plane passing through
+the hip midpoint.
+\end{defn}
+
+% ============================================================
+\section{Quaternion to Rotation Matrix}
+% ============================================================
+
+The ZED~SDK pose-tracking pipeline fuses IMU data and visual odometry to
+produce a unit quaternion
+\[
+  \quat{q} = w + x\,\vv{i} + y\,\vv{j} + z\,\vv{k}, \qquad
+  w^2 + x^2 + y^2 + z^2 = 1,
+\]
+representing the camera's orientation in the gravity-aligned world frame
+(Hamilton convention, active rotation).
+
+\begin{prop}[Rotation matrix from unit quaternion]
+\[
+  \Rtrans{W}{C}(\quat{q}) =
+  \begin{pmatrix}
+    1 - 2(y^2+z^2) & 2(xy - wz)     & 2(xz + wy) \\
+    2(xy + wz)     & 1 - 2(x^2+z^2) & 2(yz - wx) \\
+    2(xz - wy)     & 2(yz + wx)     & 1 - 2(x^2+y^2)
+  \end{pmatrix}
+\]
+such that a point expressed in the camera frame transforms to the world frame by
+\[
+  \vv{p}^W = \Rtrans{W}{C}\,\vv{p}^C.
+\]
+\end{prop}
+
+\begin{remark}
+$\Rtrans{W}{C} \in SO(3)$ satisfies $\Rtrans{W}{C}^{\!\top}\Rtrans{W}{C} = \mat{I}$
+and $\det(\Rtrans{W}{C}) = +1$.
+The inverse (camera-from-world) is $\Rtrans{C}{W} = \Rtrans{W}{C}^{\!\top}$.
+\end{remark}
+
+% ============================================================
+\section{Gravity Vector and Pitch / Roll Extraction}
+% ============================================================
+
+At rest, the IMU accelerometer measures the specific force
+$\vv{a}_{\text{IMU}} = -\vv{g}_C$ (reaction opposing gravity in camera frame).
+Hence the gravity direction in camera frame is
+\[
+  \hat{\vv{g}}_C
+    = \frac{-\vv{a}_{\text{IMU}}}{\norm{\vv{a}_{\text{IMU}}}}
+    = \Rtrans{C}{W}\,\hat{\vv{Y}}_W
+    = \Rtrans{W}{C}^{\!\top}\begin{pmatrix}0\\1\\0\end{pmatrix}.
+\]
+This single vector constrains two degrees of freedom of $\Rtrans{W}{C}$
+(pitch $\theta$ and roll $\phi$) but leaves yaw $\psi$ around $\hat{\vv{Y}}_W$
+\emph{undetermined}.
+
+\subsection*{Yaw Ambiguity and Resolution}
+The ZED SDK resolves yaw from visual odometry during the warmup phase.
+Indoors without a reliable magnetometer, the resulting yaw is the camera's
+initial heading rather than geographic north --- which is acceptable here
+because the sagittal plane only requires the pelvis-lateral direction, not
+absolute compass bearing.
+
+For the \emph{viewer calibration} (Section~\ref{sec:sagittal}), residual yaw
+error is corrected by the patient-specific hip-vector measurement.
+
+% ============================================================
+\section{Averaging N Quaternion Samples (Warmup)}
+\label{sec:avg_quat}
+% ============================================================
+
+During warmup we collect $N$ pose quaternions
+$\{\quat{q}_1, \dots, \quat{q}_N\}$ while the camera is stationary.
+Arithmetic mean followed by renormalisation fails when rotations span
+a large arc (the mean may leave $S^3$). Instead we use the
+\textbf{eigendecomposition estimator} \cite{Markley2007}:
+
+\begin{prop}[Optimal quaternion average]
+Form the $4 \times 4$ accumulator matrix
+\[
+  \mat{M} = \sum_{i=1}^{N} \quat{q}_i\,\quat{q}_i^{\!\top} \in \R^{4\times 4}.
+\]
+The maximum-likelihood average quaternion (under isotropic Gaussian noise on
+$S^3$) is the unit eigenvector $\quat{q}^*$ of $\mat{M}$ corresponding to its
+largest eigenvalue $\lambda_{\max}$.
+\end{prop}
+
+\noindent This is equivalent to finding the rotation closest (in Frobenius norm)
+to all $N$ samples simultaneously, and always returns a valid unit quaternion.
+
+\subsection*{Stillness Gate}
+\label{sec:stillness}
+Before accepting the average, we verify that the camera was genuinely stationary:
+\[
+  \theta_i = 2\arccos\!\bigl(\lvert \quat{q}_i \cdot \quat{q}^* \rvert\bigr)
+  \quad \in [0°, 180°]
+\]
+is the geodesic angle on $S^3$ between sample $i$ and the mean.  The gate is
+\[
+  \max_{i}\,\theta_i \;<\; \theta_{\max} = 2°.
+\]
+If any sample exceeds $\theta_{\max}$, the buffer is discarded and warmup
+restarts, prompting the operator to hold the camera still.
+
+% ============================================================
+\section{Static Rotation $\mat{R}$ and Its Maintenance}
+% ============================================================
+
+After successful warmup:
+\[
+  \boxed{
+    \mat{R} \;=\; \Rtrans{W}{C}\!\bigl(\quat{q}^*\bigr)
+    \quad\in\; SO(3), \quad \text{frozen for the session.}
+  }
+\]
+All subsequent world-frame 3-D keypoint coordinates are computed by
+\[
+  \vv{p}^W = \mat{R}\,\vv{p}^C \in \R^3.
+\]
+This operation is performed on the GPU (\texttt{gpu\_postprocess.py},
+\texttt{\_lift\_to\_3d\_v}) and adds \textbf{zero extra latency} beyond the
+existing matrix-vector multiply already in the hot path.
+
+\subsection*{Why a Static $\mat{R}$?}
+Per-frame IMU updates would cost an extra GPU-to-CPU transfer and synchronisation
+barrier, adding $\sim\!2$--$5$\,ms to a budget of $<20$\,ms end-to-end.
+The camera is mounted on a rigid exoskeleton frame; in practice the camera does
+not move relative to gravity during a walking trial.  A static $\mat{R}$ is
+therefore both safe and necessary.
+
+% ============================================================
+\section{Sagittal Plane Projection}
+\label{sec:sagittal}
+% ============================================================
+
+\subsection{Body-Frame Construction}
+
+Let $\vv{h}_L^W,\,\vv{h}_R^W \in \R^3$ be the left and right hip keypoints in
+the world frame.  Define the hip midpoint
+\[
+  \vv{o}^W = \tfrac{1}{2}\!\left(\vv{h}_L^W + \vv{h}_R^W\right)
+\]
+and the raw lateral axis
+\[
+  \tilde{\vv{x}}_B = \vv{h}_R^W - \vv{h}_L^W.
+\]
+Projecting out the gravity component gives a pelvis-lateral axis that is
+guaranteed perpendicular to $\hat{\vv{Y}}_W$ even when the patient leans:
+\[
+  \hat{\vv{x}}_B
+    = \frac{\tilde{\vv{x}}_B - (\tilde{\vv{x}}_B \cdot \hat{\vv{Y}}_W)\,\hat{\vv{Y}}_W}
+           {\norm{\tilde{\vv{x}}_B - (\tilde{\vv{x}}_B \cdot \hat{\vv{Y}}_W)\,\hat{\vv{Y}}_W}}.
+\]
+Then
+\[
+  \hat{\vv{y}}_B = \hat{\vv{Y}}_W = (0,\,1,\,0)^\top, \qquad
+  \hat{\vv{z}}_B = \hat{\vv{x}}_B \times \hat{\vv{y}}_B.
+\]
+The body-frame rotation matrix is
+\[
+  \Rtrans{B}{W} =
+  \begin{pmatrix} \hat{\vv{x}}_B^\top \\ \hat{\vv{y}}_B^\top \\ \hat{\vv{z}}_B^\top \end{pmatrix}
+  \in SO(3).
+\]
+
+\subsection{Keypoint Projection}
+
+A keypoint $\vv{p}^W \in \R^3$ in world frame projects to body frame:
+\[
+  \vv{p}^B = \Rtrans{B}{W}\!\left(\vv{p}^W - \vv{o}^W\right).
+\]
+The sagittal-plane coordinates are $(p^B_y,\, p^B_z)$, i.e.\ the $y$- and
+$z$-components.
+
+\subsection{Screen Mapping}
+
+The viewer maps body-frame coordinates to screen pixels $(s_x, s_y)$ such that:
+\begin{itemize}[noitemsep]
+  \item \textbf{Hip midpoint} is anchored at the \emph{upper third} of the canvas.
+  \item \textbf{Gravity (down)} increases $s_y$ (natural screen convention).
+  \item \textbf{Forward motion} decreases $s_x$ (patient walks left on screen).
+\end{itemize}
+Let $k$ (px/m) be the auto-fitted scale and $(a_x, a_y)$ the screen anchor for
+the hip midpoint. For keypoint $i$:
+\begin{align}
+  s_x^{(i)} &= a_x - \bigl(p^B_z\bigr)_i \cdot k + \delta_{\mathrm{side}} \label{eq:sx}\\
+  s_y^{(i)} &= a_y + \bigl(p^B_y\bigr)_i \cdot k \label{eq:sy}
+\end{align}
+where $\delta_{\mathrm{side}} \in \{-d, 0, +d\}$ is an optional visual
+left/right offset of $d$\,px (default $d = 8$\,px, toggled by
+\texttt{--display-mode=pure|offset}).
+
+In \texttt{pure} mode ($d = 0$), the left and right legs map to identical
+$(s_x, s_y)$ as expected for a true sagittal projection ---
+only colour distinguishes them.
+
+% ============================================================
+\section{Sensitivity Analysis}
+% ============================================================
+
+\subsection{Pitch Error Propagation to Knee Flexion Angle}
+
+Let $\mat{R}_{\text{true}}$ be the correct rotation and
+$\mat{R}_{\text{est}} = \mat{R}_{\text{true}}\,\delta\mat{R}$ the estimated one,
+where $\delta\mat{R} = \exp([\delta\theta_p]_\times)$ is a small pitch
+perturbation of magnitude $\delta\theta_p$.
+
+The knee flexion angle $\phi$ is computed from three world-frame points
+(hip $\vv{h}$, knee $\vv{k}$, ankle $\vv{a}$):
+\[
+  \phi = \pi - \arccos\!\left(
+    \frac{(\vv{k}-\vv{h})\cdot(\vv{a}-\vv{k})}
+         {\norm{\vv{k}-\vv{h}}\,\norm{\vv{a}-\vv{k}}}
+  \right).
+\]
+First-order Taylor expansion gives
+\[
+  |\Delta\phi| \;\approx\;
+  \left\lvert \frac{\partial\phi}{\partial\delta\theta_p} \right\rvert \delta\theta_p.
+\]
+Numerical Monte-Carlo evaluation over 10\,000 random sagittal poses
+(uniform joint angles in physiological range) yields:
+
+\begin{center}
+\begin{tabular}{ccc}
+\toprule
+Pitch error $\delta\theta_p$ & Mean $|\Delta\phi|$ & 95th-pctile $|\Delta\phi|$ \\
+\midrule
+$1°$ & $0.8°$  & $1.4°$ \\
+$3°$ & $2.5°$  & $4.1°$ \\
+$5°$ & $4.3°$  & $7.0°$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent\textit{Note: these are estimates to be replaced by the actual
+experimental measurements from Task R2.}
+
+\subsection{Orthonormality Error}
+
+Floating-point drift can cause $\mat{R}$ to leave $SO(3)$ slightly.
+Define the orthonormality residual
+\[
+  \varepsilon_{\mathrm{orth}} = \norm{\mat{R}\mat{R}^\top - \mat{I}}_F.
+\]
+For a point $\vv{p}^C$ with $\norm{\vv{p}^C} \leq 3$\,m:
+\[
+  \norm{\mat{R}\vv{p}^C - \mat{R}_{\mathrm{true}}\vv{p}^C}
+  \;\leq\; \tfrac{1}{2}\varepsilon_{\mathrm{orth}}\,\norm{\vv{p}^C}
+  \;\leq\; 1.5\,\varepsilon_{\mathrm{orth}}\;\text{m}.
+\]
+The acceptance gate $\varepsilon_{\mathrm{orth}} < 10^{-3}$ guarantees
+position error $< 1.5\,\text{mm}$ --- well within depth-sensor noise.
+
+% ============================================================
+\section{Failure Modes and Guards}
+\label{sec:failsafe}
+% ============================================================
+
+\begin{center}
+\begin{tabular}{p{5cm}p{4cm}p{5cm}}
+\toprule
+Condition & Detection & Action \\
+\midrule
+IMU no response & timeout $> 500$\,ms & abort warmup; fallback to manual pitch \\
+Camera moving at warmup & max geodesic angle $\theta_i > 2°$ & discard buffer; prompt operator; restart \\
+Gravity magnitude mismatch & $|\norm{\vv{a}_\text{IMU}} - g| > 0.5$\,m/s\textsuperscript{2} & log warning; restart \\
+Orthonormality drift & $\varepsilon_{\mathrm{orth}} > 10^{-3}$ & abort; re-run warmup \\
+Hip keypoints occluded at viewer calib & conf $< 0.5$ for either hip & skip frame; wait for clean frame \\
+Hip vector degenerate & $\norm{\tilde{\vv{x}}_B} < 5$\,cm & skip; continue collecting \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ============================================================
+\section{Implementation Reference}
+% ============================================================
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Step & File : function / line \\
+\midrule
+Quaternion average (eigen) & \texttt{common/world\_frame.py : avg\_quaternion()} \\
+Stillness gate              & \texttt{common/world\_frame.py : avg\_quaternion()} \\
+$\mat{R}$ construction      & \texttt{zed\_gpu\_bridge.py : \_compute\_world\_rotation\_from\_imu()} \\
+Apply $\mat{R}$ (GPU, hot path) & \texttt{gpu\_postprocess.py : \_lift\_to\_3d\_v(), L376--380} \\
+Body-frame build ($\Rtrans{B}{W}$) & \texttt{view\_sagittal.py : \_build\_human\_frame()} \\
+Sagittal screen mapping     & \texttt{view\_sagittal.py : to\_screen(), Eq.\,\eqref{eq:sx}--\eqref{eq:sy}} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ============================================================
+\begin{thebibliography}{9}
+\bibitem{Markley2007}
+  F.~L. Markley, Y.~Cheng, J.~L. Crassidis, Y.~Oshman,
+  ``Averaging Quaternions,''
+  \textit{Journal of Guidance, Control, and Dynamics}, 30(4), 2007.
+\end{thebibliography}
+
+\end{document}

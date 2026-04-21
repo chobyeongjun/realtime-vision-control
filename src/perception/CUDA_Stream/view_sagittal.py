@@ -67,6 +67,11 @@ def parse_args() -> argparse.Namespace:
                          "learn the human X axis (left_hip→right_hip direction)")
     ap.add_argument("--no-calib", dest="no_calib", action="store_true",
                     help="disable standing calibration; use raw world Y-Z (legacy)")
+    ap.add_argument("--display-mode", dest="display_mode", default="offset",
+                    choices=["pure", "offset"],
+                    help="pure: L/R keypoints overlap exactly (true sagittal, "
+                         "colour-only distinction); "
+                         "offset: ±leg_offset_px horizontal separation (default)")
     return ap.parse_args()
 
 
@@ -232,32 +237,49 @@ def main() -> int:
                 else:
                     display_kpts = last_kpts_3d
 
-            # ── Layout: always use ALL 6 keypoints (no conf gate) ────────
+            # ── Layout: hip-center as fixed origin, all 6 keypoints ─────
             if display_kpts is not None:
-                z_all = display_kpts[:, 2]            # forward (m)
-                y_up_all = -display_kpts[:, 1]        # up (m); SHM Y is +down
-                z_min, z_max = float(z_all.min()), float(z_all.max())
-                y_min, y_max = float(y_up_all.min()), float(y_up_all.max())
-                z_span = max(z_max - z_min, 0.30)
-                y_span = max(y_max - y_min, 0.30)
-                s_z = (W - 2 * margin) / z_span
-                s_y = (H - 2 * margin) / y_span
-                scale = min(s_z, s_y) * args.zoom
-                z_center = (z_min + z_max) / 2
-                y_center = (y_min + y_max) / 2
+                # C2: hip midpoint is the projection origin (in display frame).
+                # Both L-hip and R-hip project to this point in pure sagittal.
+                if lh_idx is not None and rh_idx is not None:
+                    hip_ctr = 0.5 * (display_kpts[lh_idx] + display_kpts[rh_idx])
+                else:
+                    hip_ctr = display_kpts.mean(axis=0)
 
-                def to_screen(z: float, y_up: float, side_offset: int = 0) -> Tuple[int, int]:
-                    sx = int(margin + (z - z_center) * scale + (W - 2 * margin) / 2 + side_offset)
-                    sy = int(H - margin - (y_up - y_center) * scale - (H - 2 * margin) / 2)
+                # C4: Sx = −Z  (forward → left on screen)
+                #     Sy = +Y  (world Y+ = down → screen bottom)
+                # No sign flip needed for Y — direct mapping to gravity.
+                z_all = display_kpts[:, 2]   # forward (m), world Z
+                y_all = display_kpts[:, 1]   # down    (m), world Y
+
+                # Auto-scale: distances from hip_ctr set the viewport.
+                rel_z = z_all - hip_ctr[2]
+                rel_y = y_all - hip_ctr[1]
+                z_half  = max(float(np.abs(rel_z).max()), 0.15)   # symmetric ±Z
+                y_below = max(float(rel_y.max()), 0.15)            # legs below hip
+                y_above = max(float(-rel_y.min()), 0.05)           # head-room above
+
+                s_z = (W / 2 - margin) / z_half
+                s_y = (H - 3 * margin) / max(y_below + y_above, 0.30)
+                scale = min(s_z, s_y) * args.zoom
+
+                # Hip midpoint is anchored at upper 25 % of canvas.
+                anchor_x = W // 2
+                anchor_y = margin + int(H * 0.12)
+
+                def to_screen(z: float, y: float, side_offset: int = 0) -> Tuple[int, int]:
+                    sx = int(anchor_x - (z - hip_ctr[2]) * scale + side_offset)
+                    sy = int(anchor_y + (y - hip_ctr[1]) * scale)
                     return sx, sy
 
-                # Grid (every 0.25m on z) + axis labels
-                z_low = z_center - (W / 2 - margin) / scale
-                z_high = z_center + (W / 2 - margin) / scale
+                # Grid: vertical lines every 0.25 m along Z, centred on hip_ctr.
                 tick = 0.25
+                z_half_world = (W / 2 - margin) / scale
+                z_low  = hip_ctr[2] - z_half_world
+                z_high = hip_ctr[2] + z_half_world
                 z_t = np.ceil(z_low / tick) * tick
                 while z_t <= z_high:
-                    sx, _ = to_screen(z_t, y_center)
+                    sx, _ = to_screen(z_t, hip_ctr[1])
                     if margin < sx < W - margin:
                         cv2.line(img, (sx, margin), (sx, H - margin), (55, 55, 55), 1)
                         if abs(z_t - round(z_t)) < 1e-3:
@@ -271,12 +293,14 @@ def main() -> int:
                 cv2.putText(img, "g", (ax - 14, ay1 - 18),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
 
-                # ── Compute per-side screen points (with X-offset) ────────
-                offset = args.leg_offset_px
+                # ── Compute per-side screen points ────────────────────────
+                # C5: pure mode → no offset (true sagittal, colour-only);
+                #     offset mode → ±leg_offset_px visual separation.
+                offset = args.leg_offset_px if args.display_mode == "offset" else 0
                 pts: List[Optional[Tuple[int, int]]] = [None] * len(z_all)
                 for i in range(len(z_all)):
                     side_off = -offset if is_left[i] else (+offset if is_right[i] else 0)
-                    pts[i] = to_screen(float(z_all[i]), float(y_up_all[i]), side_off)
+                    pts[i] = to_screen(float(z_all[i]), float(y_all[i]), side_off)
 
                 # ── Draw bones (under joints) ─────────────────────────────
                 # Left = blue, right = red. Pelvis = grey.
@@ -353,13 +377,14 @@ def main() -> int:
                 calib_tag = f"calibrating {len(calib_buf)}/{args.calib_frames}"
             header = (f"frame {last_frame_id}  conf {last_box_conf:.2f}  "
                       f"depth_inv {last_dir:.0%}  viewer {fps_show:.0f}Hz  "
-                      f"{valid_tag}  [{calib_tag}]")
+                      f"{valid_tag}  [{calib_tag}]  mode:{args.display_mode}")
             cv2.putText(img, header, (10, 22), cv2.FONT_HERSHEY_SIMPLEX,
                         0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
-            cv2.putText(img, "Z (forward) ->", (W - 140, H - 8),
+            # Axis labels: Z increases going LEFT, Y increases going DOWN.
+            cv2.putText(img, "<- Z (forward)", (10, H - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (110, 110, 110), 1, cv2.LINE_AA)
-            cv2.putText(img, "-Y (up)", (6, 14),
+            cv2.putText(img, "+Y (down)", (6, anchor_y - 6 if display_kpts is not None else 14),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (110, 110, 110), 1, cv2.LINE_AA)
 
             cv2.imshow("sagittal", img)
