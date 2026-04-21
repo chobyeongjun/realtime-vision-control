@@ -80,6 +80,22 @@ def parse_args() -> argparse.Namespace:
                     help="stop when dump ends (only with --dump-file; "
                          "default is looping)")
     ap.set_defaults(loop=True)
+    ap.add_argument("--no-sanity", dest="sanity", action="store_false",
+                    help="disable anatomical sanity gate. By default, frames "
+                         "with impossible bone lengths or L/R asymmetry are "
+                         "treated as invalid and the sticky display holds.")
+    ap.set_defaults(sanity=True)
+    ap.add_argument("--sanity-hip", nargs=2, type=float,
+                    metavar=("LO", "HI"), default=(0.15, 0.60),
+                    help="acceptable hip-width range in meters (default 0.15–0.60)")
+    ap.add_argument("--sanity-thigh", nargs=2, type=float,
+                    metavar=("LO", "HI"), default=(0.25, 0.60),
+                    help="acceptable thigh length in meters (default 0.25–0.60)")
+    ap.add_argument("--sanity-shank", nargs=2, type=float,
+                    metavar=("LO", "HI"), default=(0.20, 0.55),
+                    help="acceptable shank length in meters (default 0.20–0.55)")
+    ap.add_argument("--sanity-asym", type=float, default=1.30,
+                    help="max L/R asymmetry ratio (default 1.30 = 30%%)")
     return ap.parse_args()
 
 
@@ -132,6 +148,70 @@ def _resolve_index(schema, name: str) -> Optional[int]:
         return schema.index(name)
     except (ValueError, KeyError):
         return None
+
+
+def _check_anatomy(
+    kpts_3d: np.ndarray,
+    idx_map: dict,
+    hip_bounds: Tuple[float, float],
+    thigh_bounds: Tuple[float, float],
+    shank_bounds: Tuple[float, float],
+    asym_max: float,
+) -> Tuple[bool, List[str]]:
+    """Biomechanical sanity gate.
+
+    Checks whether the 3-D keypoint configuration is anatomically plausible.
+    YOLO pose models occasionally produce impossible poses (self-occlusion,
+    L/R swap, treadmill-belt confusion, motion blur). These frames are
+    indistinguishable from good ones via confidence alone, so we use geometric
+    priors as a second line of defence.
+
+    All checks are read-only: we flag the frame, never correct it — consistent
+    with CLAUDE.md's ban on keypoint-feedback loops.
+
+    Returns (is_valid, list_of_failure_reasons).
+    """
+    reasons: List[str] = []
+
+    def dist_mm(a_name: str, b_name: str) -> Optional[float]:
+        ia = idx_map.get(a_name)
+        ib = idx_map.get(b_name)
+        if ia is None or ib is None:
+            return None
+        return float(np.linalg.norm(kpts_3d[ia] - kpts_3d[ib]))
+
+    hw = dist_mm("left_hip", "right_hip")
+    if hw is not None:
+        lo, hi = hip_bounds
+        if not (lo <= hw <= hi):
+            reasons.append(f"hip_w={hw*100:.0f}cm")
+
+    l_thigh = dist_mm("left_hip", "left_knee")
+    r_thigh = dist_mm("right_hip", "right_knee")
+    l_shank = dist_mm("left_knee", "left_ankle")
+    r_shank = dist_mm("right_knee", "right_ankle")
+
+    t_lo, t_hi = thigh_bounds
+    for name, val in (("Lt", l_thigh), ("Rt", r_thigh)):
+        if val is not None and not (t_lo <= val <= t_hi):
+            reasons.append(f"{name}={val*100:.0f}cm")
+
+    s_lo, s_hi = shank_bounds
+    for name, val in (("Ls", l_shank), ("Rs", r_shank)):
+        if val is not None and not (s_lo <= val <= s_hi):
+            reasons.append(f"{name}={val*100:.0f}cm")
+
+    if l_thigh is not None and r_thigh is not None and min(l_thigh, r_thigh) > 1e-3:
+        asym_t = max(l_thigh, r_thigh) / min(l_thigh, r_thigh)
+        if asym_t > asym_max:
+            reasons.append(f"TA={asym_t:.2f}")
+
+    if l_shank is not None and r_shank is not None and min(l_shank, r_shank) > 1e-3:
+        asym_s = max(l_shank, r_shank) / min(l_shank, r_shank)
+        if asym_s > asym_max:
+            reasons.append(f"SA={asym_s:.2f}")
+
+    return (len(reasons) == 0, reasons)
 
 
 def main() -> int:
@@ -193,6 +273,14 @@ def main() -> int:
     lh_idx = _resolve_index(schema, "left_hip")
     rh_idx = _resolve_index(schema, "right_hip")
 
+    # Index map for sanity gate (name → array index).
+    kp_idx_map = {n: _resolve_index(schema, n) for n in schema.keypoints}
+
+    # Counters for the sanity gate so the header can summarise rejections.
+    sanity_rejects = 0
+    sanity_accepted = 0
+    last_sanity_reasons: List[str] = []
+
     # Standing-calibration buffer: collect first N valid hip vectors
     # (in world frame), average → human X axis. Then build R that
     # rotates world coords so the human's lateral X is aligned with
@@ -220,6 +308,27 @@ def main() -> int:
             cur_frame_id = -1
             if data is not None:
                 cur_frame_id, _ts, kpts_3d, kpt_conf, _kpts_2d, box_conf, valid, dir_ = data
+                # Geometric sanity gate — catches YOLO failure modes (self-occlusion,
+                # L/R swap, treadmill-belt confusion) that produce impossible poses
+                # while still reporting valid=True. Gate is read-only; rejected
+                # frames are held with the existing sticky display.
+                if valid and args.sanity:
+                    raw_3d = np.asarray(kpts_3d)
+                    sane, reasons = _check_anatomy(
+                        raw_3d, kp_idx_map,
+                        tuple(args.sanity_hip),
+                        tuple(args.sanity_thigh),
+                        tuple(args.sanity_shank),
+                        args.sanity_asym,
+                    )
+                    if not sane:
+                        sanity_rejects += 1
+                        last_sanity_reasons = reasons
+                        valid = False
+                    else:
+                        sanity_accepted += 1
+                        last_sanity_reasons = []
+
                 if valid:
                     last_kpts_3d = np.asarray(kpts_3d).copy()
                     last_kpt_conf = np.asarray(kpt_conf).copy()
@@ -401,11 +510,26 @@ def main() -> int:
                 calib_tag = "calibrated"
             else:
                 calib_tag = f"calibrating {len(calib_buf)}/{args.calib_frames}"
+            if args.sanity:
+                total_checked = sanity_rejects + sanity_accepted
+                reject_pct = (sanity_rejects / total_checked * 100.0
+                              if total_checked else 0.0)
+                sanity_tag = f"sanity:{reject_pct:.0f}%rej"
+            else:
+                sanity_tag = "sanity:off"
             header = (f"frame {last_frame_id}  conf {last_box_conf:.2f}  "
                       f"depth_inv {last_dir:.0%}  viewer {fps_show:.0f}Hz  "
-                      f"{valid_tag}  [{calib_tag}]  mode:{args.display_mode}")
+                      f"{valid_tag}  [{calib_tag}]  mode:{args.display_mode}  "
+                      f"{sanity_tag}")
             cv2.putText(img, header, (10, 22), cv2.FONT_HERSHEY_SIMPLEX,
                         0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+            # When the current frame was rejected, show the reasons in red
+            # just below the header — makes it obvious which check failed.
+            if (not cur_valid) and last_sanity_reasons:
+                msg = "REJECT: " + " ".join(last_sanity_reasons[:4])
+                cv2.putText(img, msg, (10, 42), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.45, (80, 80, 255), 1, cv2.LINE_AA)
 
             # Axis labels: Z increases going LEFT, Y increases going DOWN.
             cv2.putText(img, "<- Z (forward)", (10, H - 8),
