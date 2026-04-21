@@ -191,7 +191,14 @@ class TRTRunner:
                 binding.tensor.copy_(tensor, non_blocking=True)
 
     def bind_input_address(self, name: str, tensor: torch.Tensor) -> None:
-        """Directly bind caller-owned tensor as input (zero-copy)."""
+        """Directly bind caller-owned tensor as input (zero-copy).
+
+        TRT 10.x: ``set_tensor_address`` mutates context state and adds
+        non-trivial launch overhead (~0.5-1ms per call). We cache the
+        last bound pointer per tensor name and only call when it changes.
+        For preproc output that's reused frame-to-frame this means we
+        only call set_tensor_address once across the entire run.
+        """
         binding = self.bindings[name]
         if not binding.is_input:
             raise ValueError(f"{name} is not an input")
@@ -200,7 +207,14 @@ class TRTRunner:
                 f"{name} expects shape={binding.tensor.shape} dtype={binding.dtype}, "
                 f"got shape={tensor.shape} dtype={tensor.dtype}"
             )
-        self.context.set_tensor_address(name, int(tensor.data_ptr()))
+        new_ptr = int(tensor.data_ptr())
+        cached = getattr(self, "_bound_ptrs", None)
+        if cached is None:
+            cached = {}
+            self._bound_ptrs = cached
+        if cached.get(name) != new_ptr:
+            self.context.set_tensor_address(name, new_ptr)
+            cached[name] = new_ptr
 
     def get_output(self, name: str) -> torch.Tensor:
         return self.bindings[name].tensor

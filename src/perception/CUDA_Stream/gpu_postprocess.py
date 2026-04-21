@@ -167,14 +167,47 @@ class GpuPostprocessor:
         with torch.cuda.stream(stream):
             det = raw_output[0]  # (N, last)
             conf = det[:, 4]
-            # Combine the first two D2H syncs: one .cpu() call is ~1µs,
-            # two .item() calls each force their own sync. We need both
-            # the argmax index and its value — do it once and reuse.
+            # Use GPU argmax (no D2H here). gather best row directly.
             best = torch.argmax(conf)
-            best_tuple = torch.stack([best.float(), conf[best]]).cpu()
-            best_idx = int(best_tuple[0].item())
-            box_conf = float(best_tuple[1].item())
+            box_conf_t = conf[best]
 
+            # Stage 1 — do ALL GPU work first, no .item()/.cpu() calls.
+            # We collect every scalar we'll need into a single tensor and
+            # sync ONCE at the end. TRT 10.x makes per-stream syncs more
+            # expensive, so going from 4 syncs (old) → 1 sync (new) is
+            # the dominant post-stage speedup.
+
+            # Gather best row's keypoints (still on GPU)
+            kpts = det[best, kpt_offset : kpt_offset + K * 3].view(K, 3)
+            xy_letter = kpts[:, :2]
+            kp_conf = kpts[:, 2]
+
+            # Un-letterbox
+            xy_src = xy_letter.clone()
+            xy_src[:, 0] = (xy_src[:, 0] - lb_params.pad_x) / lb_params.scale
+            xy_src[:, 1] = (xy_src[:, 1] - lb_params.pad_y) / lb_params.scale
+            xy_src[:, 0].clamp_(0, lb_params.src_w - 1)
+            xy_src[:, 1].clamp_(0, lb_params.src_h - 1)
+
+            # 3D lift (vectorized — see _lift_to_3d_v); returns invalid as GPU tensor
+            if depth_hw is not None:
+                kpts_3d, invalid_ratio_t = self._lift_to_3d_v(
+                    xy_src, depth_hw, calibration, kp_conf
+                )
+            else:
+                kpts_3d = torch.zeros((K, 3), device=self.device)
+                kpts_3d[:, :2] = xy_src
+                invalid_ratio_t = torch.tensor(1.0, device=self.device)
+
+            # Occlusion count on GPU
+            num_low_conf_t = (kp_conf < self.kpt_conf_threshold).sum().float()
+
+            # === Single D2H sync — combine 3 scalars into 1 transfer ===
+            scalars = torch.stack([box_conf_t, num_low_conf_t, invalid_ratio_t]).cpu()
+            box_conf, num_low_conf_f, invalid_ratio = scalars.tolist()
+            num_low_conf = int(num_low_conf_f)
+
+            # Branch on box_conf (CPU side) — only reached after one sync
             if box_conf < self.conf_threshold:
                 zeros2 = torch.zeros((K, 2), device=self.device)
                 zeros3 = torch.zeros((K, 3), device=self.device)
@@ -184,30 +217,7 @@ class GpuPostprocessor:
                     box_conf=box_conf, valid=False, depth_invalid_ratio=1.0,
                 )
 
-            kpts = det[best_idx, kpt_offset : kpt_offset + K * 3].view(K, 3)
-            xy_letter = kpts[:, :2]
-            kp_conf = kpts[:, 2]
-
-            xy_src = xy_letter.clone()
-            xy_src[:, 0] = (xy_src[:, 0] - lb_params.pad_x) / lb_params.scale
-            xy_src[:, 1] = (xy_src[:, 1] - lb_params.pad_y) / lb_params.scale
-            xy_src[:, 0].clamp_(0, lb_params.src_w - 1)
-            xy_src[:, 1].clamp_(0, lb_params.src_h - 1)
-
-            if depth_hw is not None:
-                kpts_3d, depth_invalid = self._lift_to_3d(xy_src, depth_hw, calibration, kp_conf)
-            else:
-                kpts_3d = torch.zeros((K, 3), device=self.device)
-                kpts_3d[:, :2] = xy_src
-                depth_invalid = 1.0
-
-            # Occlusion handling — occlusion threshold scales with schema.
-            # We count low-confidence keypoints on-device then do ONE
-            # .item() here (not two separate argmax/item calls) to
-            # minimize D2H sync in the hot path.
-            num_low_conf = int((kp_conf < self.kpt_conf_threshold).sum().item())
             occluded = num_low_conf >= self.occluded_count
-
             if self._filter is not None and not occluded:
                 kpts_3d = self._filter(kpts_3d, ts_s)
 
@@ -217,36 +227,55 @@ class GpuPostprocessor:
                 kpt_conf=kp_conf,
                 box_conf=box_conf,
                 valid=not occluded,
-                depth_invalid_ratio=depth_invalid,
+                depth_invalid_ratio=invalid_ratio,
             )
 
     # ------------------------------------------------------------------
-    def _lift_to_3d(
+    def _lift_to_3d_v(
         self,
         xy: torch.Tensor,
         depth_hw: torch.Tensor,
         calib: dict,
         kp_conf: torch.Tensor,
-    ) -> Tuple[torch.Tensor, float]:
-        H, W = depth_hw.shape
-        K = xy.shape[0]
-        r = self.depth_patch // 2
-        u = xy[:, 0].clamp(r, W - r - 1).long()
-        v = xy[:, 1].clamp(r, H - r - 1).long()
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Vectorized 3D lift — single GPU op for all keypoints+patches.
 
-        patches = []
-        for dv in range(-r, r + 1):
-            for du in range(-r, r + 1):
-                patches.append(depth_hw[v + dv, u + du])
-        patches = torch.stack(patches, dim=0)  # (patch², K)
+        Replaces the old Python double-loop (9 GPU launches for 3×3 patch)
+        with a single advanced-indexing op (1 launch). Also defers the
+        invalid_ratio .item() — caller does ONE combined D2H sync.
+
+        Returns:
+            (xyz, invalid_ratio_gpu) — xyz is (K, 3), invalid_ratio is
+            a 0-d GPU tensor that the caller stacks with other scalars
+            into a single .cpu() transfer.
+        """
+        H, W = depth_hw.shape
+        r = self.depth_patch // 2
+        u = xy[:, 0].clamp(r, W - r - 1).long()  # (K,)
+        v = xy[:, 1].clamp(r, H - r - 1).long()  # (K,)
+
+        # Cache patch-offset indices: depth_patch is fixed at init, so
+        # we build (P², ) offsets once and reuse across frames.
+        psize = 2 * r + 1
+        cached_dv = getattr(self, "_dv_cache", None)
+        if cached_dv is None or cached_dv.numel() != psize * psize:
+            offs = torch.arange(-r, r + 1, device=self.device)
+            dv_grid, du_grid = torch.meshgrid(offs, offs, indexing="ij")
+            self._dv_cache = dv_grid.reshape(-1)  # (P²,)
+            self._du_cache = du_grid.reshape(-1)  # (P²,)
+
+        # Broadcast: (P², 1) + (1, K) → (P², K) — single advanced index
+        vv = v.unsqueeze(0) + self._dv_cache.unsqueeze(1)
+        uu = u.unsqueeze(0) + self._du_cache.unsqueeze(1)
+        patches = depth_hw[vv, uu]  # (P², K) — 1 GPU launch (was 9)
 
         valid = torch.isfinite(patches) & (patches > 0.0)
         patches = torch.where(valid, patches, torch.full_like(patches, float("nan")))
         z = torch.nanmedian(patches, dim=0).values  # (K,)
         z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # per-joint invalid ratio — useful for watchdog
-        invalid_ratio = float((~valid).float().mean().item())
+        # invalid ratio stays on GPU — caller stacks + syncs
+        invalid_ratio_t = (~valid).float().mean()
 
         z = torch.where(kp_conf >= self.kpt_conf_threshold, z, torch.zeros_like(z))
 
@@ -264,5 +293,5 @@ class GpuPostprocessor:
         if R is not None:
             # R: (3, 3) on same device; xyz_cam @ R.T == (R @ xyz.T).T
             xyz_world = xyz_cam @ R.t()
-            return xyz_world, invalid_ratio
-        return xyz_cam, invalid_ratio
+            return xyz_world, invalid_ratio_t
+        return xyz_cam, invalid_ratio_t
