@@ -62,7 +62,56 @@ def parse_args() -> argparse.Namespace:
                     help="below this conf the keypoint is drawn dim/grey")
     ap.add_argument("--leg-offset-px", dest="leg_offset_px", type=int, default=8,
                     help="visual screen-space X offset between left/right legs (px)")
+    ap.add_argument("--calib-frames", dest="calib_frames", type=int, default=30,
+                    help="standing-calibration window: first N valid frames to "
+                         "learn the human X axis (left_hip→right_hip direction)")
+    ap.add_argument("--no-calib", dest="no_calib", action="store_true",
+                    help="disable standing calibration; use raw world Y-Z (legacy)")
     return ap.parse_args()
+
+
+def _build_human_frame(hip_vector_world: np.ndarray) -> Optional[np.ndarray]:
+    """Build R_human_from_world: rotates world coords into human-aligned frame.
+
+    Inputs:
+      hip_vector_world: (3,) avg of (right_hip - left_hip) in world frame.
+                        This is the human's lateral (X) axis after rotation.
+
+    Output:
+      R: (3,3) rotation s.t. ``p_human = R @ p_world``
+        - human X = pelvis lateral (right side positive)
+        - human Y = gravity down (== world Y, unchanged)
+        - human Z = X × Y (human forward — perpendicular to pelvis line and
+                            to gravity, in the front-of-body direction)
+
+    Returns None if hip_vector is too small (degenerate, e.g. occlusion at
+    calibration time). Caller should keep retrying until a clean frame.
+
+    True sagittal projection is then ``(z_human, -y_human)`` per joint —
+    independent of how the camera is pointed; the legs always look like a
+    side-view skeleton because we project onto the plane PERPENDICULAR to
+    the actual pelvis line, not perpendicular to the camera Z.
+    """
+    n = float(np.linalg.norm(hip_vector_world))
+    if n < 0.05:  # < 5cm → bad (e.g. only one hip detected at calib time)
+        return None
+    x_human = hip_vector_world / n           # (3,)
+    y_human = np.array([0.0, 1.0, 0.0])      # world Y is gravity (down)
+    # Re-orthogonalize x against y (project out the Y component) so the
+    # rotation is well-defined when the pelvis isn't perfectly horizontal.
+    x_human = x_human - np.dot(x_human, y_human) * y_human
+    nx = float(np.linalg.norm(x_human))
+    if nx < 0.05:
+        return None
+    x_human /= nx
+    z_human = np.cross(x_human, y_human)     # forward (right-handed)
+    nz = float(np.linalg.norm(z_human))
+    if nz < 0.05:
+        return None
+    z_human /= nz
+    # Rows of R are the new basis expressed in old coords.
+    R = np.stack([x_human, y_human, z_human], axis=0)  # (3,3)
+    return R
 
 
 def _resolve_index(schema, name: str) -> Optional[int]:
@@ -109,6 +158,21 @@ def main() -> int:
     last_frame_id = -1
     sticky_age_frames = 0
 
+    # Resolve hip indices for calibration (need both for hip vector).
+    lh_idx = _resolve_index(schema, "left_hip")
+    rh_idx = _resolve_index(schema, "right_hip")
+
+    # Standing-calibration buffer: collect first N valid hip vectors
+    # (in world frame), average → human X axis. Then build R that
+    # rotates world coords so the human's lateral X is aligned with
+    # screen X — equivalently, world Z gets rotated to be the
+    # walking-forward direction. The user sees a true side view of
+    # the gait regardless of camera yaw.
+    R_view: Optional[np.ndarray] = None
+    calib_buf: List[np.ndarray] = []
+    calib_done = False
+    calib_failed = False
+
     # FPS counter
     fps_t0 = time.monotonic()
     fps_n = 0
@@ -133,13 +197,45 @@ def main() -> int:
                     last_frame_id = cur_frame_id
                     sticky_age_frames = 0
                     cur_valid = True
+
+                    # ── Standing calibration (first N valid frames) ──
+                    # Collect right_hip - left_hip in WORLD frame, average,
+                    # use that as the "lateral" axis. Then world Z gets
+                    # rotated to be the human walking-forward direction.
+                    if (not args.no_calib and not calib_done
+                            and lh_idx is not None and rh_idx is not None):
+                        if (last_kpt_conf[lh_idx] >= 0.5
+                                and last_kpt_conf[rh_idx] >= 0.5):
+                            hip_vec = (last_kpts_3d[rh_idx]
+                                       - last_kpts_3d[lh_idx])
+                            calib_buf.append(hip_vec)
+                            if len(calib_buf) >= args.calib_frames:
+                                avg = np.mean(np.stack(calib_buf, axis=0), axis=0)
+                                R_view = _build_human_frame(avg)
+                                if R_view is None:
+                                    calib_failed = True
+                                    calib_done = True  # stop trying
+                                else:
+                                    calib_done = True
                 else:
                     sticky_age_frames += 1
 
-            # ── Layout: always use ALL 6 keypoints (no conf gate) ────────
+            # ── Apply walking-direction rotation (after calibration) ──────
+            # Without this, world Z is just camera-horizontal-forward and the
+            # legs look 'foreshortened' if the user isn't perfectly facing the
+            # camera. With R_view, world Z rotates to align with the user's
+            # actual walking direction → legs always look full-length in side view.
+            display_kpts: Optional[np.ndarray] = None
             if last_kpts_3d is not None:
-                z_all = last_kpts_3d[:, 2]            # forward (m)
-                y_up_all = -last_kpts_3d[:, 1]        # up (m); SHM Y is +down
+                if R_view is not None:
+                    display_kpts = (R_view @ last_kpts_3d.T).T
+                else:
+                    display_kpts = last_kpts_3d
+
+            # ── Layout: always use ALL 6 keypoints (no conf gate) ────────
+            if display_kpts is not None:
+                z_all = display_kpts[:, 2]            # forward (m)
+                y_up_all = -display_kpts[:, 1]        # up (m); SHM Y is +down
                 z_min, z_max = float(z_all.min()), float(z_all.max())
                 y_min, y_max = float(y_up_all.min()), float(y_up_all.max())
                 z_span = max(z_max - z_min, 0.30)
@@ -214,7 +310,9 @@ def main() -> int:
                     cv2.circle(img, p, 7, fill, -1, cv2.LINE_AA)
                     cv2.circle(img, p, 7, (255, 255, 255), 1, cv2.LINE_AA)
 
-                # ── Bone length panel (lower-left) ────────────────────────
+                # ── Bone length panel (lower-left) — uses RAW world coords
+                #    (not display_kpts) so cm reads the actual physical
+                #    length, independent of the view rotation. ─────────────
                 panel_y = H - margin + 38
                 kp_name = {n: i for i, n in enumerate(schema.keypoints)}
                 for side, scol in (("left", (255, 130, 80)), ("right", (80, 80, 255))):
@@ -245,8 +343,17 @@ def main() -> int:
                 fps_t0 = now
 
             valid_tag = "VALID" if cur_valid else f"sticky+{sticky_age_frames}"
+            if args.no_calib:
+                calib_tag = "calib OFF"
+            elif calib_failed:
+                calib_tag = "calib FAILED — raw view"
+            elif calib_done:
+                calib_tag = "calibrated"
+            else:
+                calib_tag = f"calibrating {len(calib_buf)}/{args.calib_frames}"
             header = (f"frame {last_frame_id}  conf {last_box_conf:.2f}  "
-                      f"depth_inv {last_dir:.0%}  viewer {fps_show:.0f}Hz  {valid_tag}")
+                      f"depth_inv {last_dir:.0%}  viewer {fps_show:.0f}Hz  "
+                      f"{valid_tag}  [{calib_tag}]")
             cv2.putText(img, header, (10, 22), cv2.FONT_HERSHEY_SIMPLEX,
                         0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
