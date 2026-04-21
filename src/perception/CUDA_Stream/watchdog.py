@@ -83,6 +83,7 @@ class StreamWatchdog:
         self.poll_interval = 1.0 / max(poll_hz, 1.0)
 
         self._stop = threading.Event()
+        self._pause = threading.Event()  # set = paused (skip ticks)
         self._thread: Optional[threading.Thread] = None
         self._status = WatchdogStatus()
         self._start_ts = time.monotonic()
@@ -129,6 +130,20 @@ class StreamWatchdog:
             self._thread.join(timeout=2.0)
             self._thread = None
 
+    def pause(self) -> None:
+        """Pause stream.query() polling (use during CUDA graph capture).
+
+        Watchdog calls torch.cuda.Stream.query() every poll_interval, which
+        is a CUDA API call → forbidden during graph capture (raises
+        cudaErrorStreamCaptureUnsupported and invalidates capture).
+        Caller should pause() before capture, resume() after.
+        """
+        self._pause.set()
+
+    def resume(self) -> None:
+        """Resume stream polling after graph capture finishes."""
+        self._pause.clear()
+
     def status(self) -> WatchdogStatus:
         with self._status_lock:
             # return a shallow copy so reader isn't racing against writer
@@ -146,6 +161,12 @@ class StreamWatchdog:
     # ------------------------------------------------------------------
     def _loop(self) -> None:
         while not self._stop.is_set():
+            if self._pause.is_set():
+                # Skip CUDA polling during graph capture etc.
+                # Don't update timing anchors so we don't false-positive
+                # on resume.
+                time.sleep(self.poll_interval)
+                continue
             try:
                 self._tick()
             except Exception as err:  # pragma: no cover — never die

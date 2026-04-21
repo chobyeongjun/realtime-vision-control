@@ -57,6 +57,7 @@ class StreamedPosePipeline:
         output_name: Optional[str] = None,
         constraints: Optional[ConstraintStack] = None,
         tracer: Optional[PipelineTracer] = None,
+        watchdog: Optional[Any] = None,
     ) -> None:
         self.bridge = bridge
         self.runner = runner
@@ -70,6 +71,11 @@ class StreamedPosePipeline:
         # Tracer is OFF by default — pass one from run_stream_demo/benchmark_stream
         # with --trace to enable per-stage CUDA-event timing + CSV dump.
         self.tracer = tracer or PipelineTracer(enabled=False)
+
+        # Watchdog reference — needed to pause its stream.query() polling
+        # during CUDA graph capture (each query is a CUDA API call and
+        # would invalidate the capture with cudaErrorStreamCaptureUnsupported).
+        self._watchdog = watchdog
 
         self._input = input_name or runner.input_names[0]
         self._output = output_name or runner.output_names[0]
@@ -181,6 +187,16 @@ class StreamedPosePipeline:
             self.runner.infer_async(inf_stream_ptr)
 
         graph = GraphedStep(stream=inf_bundle.stream, fn=_infer_only, warmup=2)
+
+        # CRITICAL: pause watchdog during capture. Watchdog polls
+        # stream.query() every 5ms in a separate thread — each call is a
+        # CUDA API call that invalidates an in-progress capture
+        # (cudaErrorStreamCaptureUnsupported). This was the root cause of
+        # 'attempt 1/3 failed... 2/3 failed... 3/3 failed' even with
+        # capture_error_mode='thread_local' (same process, same thread
+        # restriction wasn't enough — watchdog runs in same process).
+        if self._watchdog is not None:
+            self._watchdog.pause()
         try:
             if graph.try_capture():
                 self._inf_graph = graph
@@ -201,6 +217,10 @@ class StreamedPosePipeline:
                 err,
             )
             self._inf_graph = None
+        finally:
+            # Always resume watchdog, even if capture raised mid-way.
+            if self._watchdog is not None:
+                self._watchdog.resume()
 
     # ------------------------------------------------------------------
     # Overlapped run — the real deal
