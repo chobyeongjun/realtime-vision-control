@@ -55,6 +55,13 @@ def main() -> int:
     ap.add_argument("--shank", nargs=2, type=float, metavar=("LO", "HI"),
                     default=DEFAULT_BOUNDS["shank"])
     ap.add_argument("--asym-max", type=float, default=DEFAULT_BOUNDS["asym_max"])
+    ap.add_argument("--knee-angle", nargs=2, type=float,
+                    metavar=("LO", "HI"), default=(30.0, 185.0),
+                    help="knee flexion angle acceptable range, degrees")
+    ap.add_argument("--ank-above-knee-tol", type=float, default=0.10,
+                    help="ankle allowed to sit above knee by this many metres")
+    ap.add_argument("--knee-above-hip-tol", type=float, default=0.20,
+                    help="knee allowed to sit above hip by this many metres")
     ap.add_argument("--valid-only", dest="valid_only", action="store_true",
                     help="ignore SHM-invalid frames (where valid=False). "
                          "Recommended — invalid frames have zero'd keypoints "
@@ -130,6 +137,47 @@ def main() -> int:
     print_stat("shank_asym", shank_asym, unit_cm=False)
     print()
 
+    # ── Knee flexion angles and orientation ───────────────────────────────
+    def knee_angle(side: str) -> np.ndarray:
+        ih = idx[f"{side}_hip"]
+        ik = idx[f"{side}_knee"]
+        ia = idx[f"{side}_ankle"]
+        v1 = kpts_3d[:, ih] - kpts_3d[:, ik]
+        v2 = kpts_3d[:, ia] - kpts_3d[:, ik]
+        n1 = np.linalg.norm(v1, axis=1)
+        n2 = np.linalg.norm(v2, axis=1)
+        ok = (n1 > 1e-3) & (n2 > 1e-3)
+        dot = np.einsum('ij,ij->i', v1, v2)
+        cos = np.divide(dot, n1 * n2, out=np.zeros_like(dot), where=ok)
+        cos = np.clip(cos, -1.0, 1.0)
+        ang = np.degrees(np.arccos(cos))
+        ang[~ok] = np.nan
+        return ang
+
+    lka = knee_angle("left")
+    rka = knee_angle("right")
+    print("Knee flexion angle (degrees, 180 = straight leg):")
+    if np.isfinite(lka).any():
+        print_stat("L_knee_angle", lka[np.isfinite(lka)], unit_cm=False)
+    if np.isfinite(rka).any():
+        print_stat("R_knee_angle", rka[np.isfinite(rka)], unit_cm=False)
+    print()
+
+    # Y ordering: world +Y = down, so ankle_y > knee_y > hip_y when standing.
+    ilh, irh = idx["left_hip"], idx["right_hip"]
+    ilk, irk = idx["left_knee"], idx["right_knee"]
+    ila, ira = idx["left_ankle"], idx["right_ankle"]
+    l_ank_above_knee_m = kpts_3d[:, ilk, 1] - kpts_3d[:, ila, 1]   # positive if violation
+    r_ank_above_knee_m = kpts_3d[:, irk, 1] - kpts_3d[:, ira, 1]
+    l_knee_above_hip_m = kpts_3d[:, ilh, 1] - kpts_3d[:, ilk, 1]
+    r_knee_above_hip_m = kpts_3d[:, irh, 1] - kpts_3d[:, irk, 1]
+    print("Y-inversion margins (metres; positive = anatomically impossible):")
+    print_stat("L_ank_above_knee", l_ank_above_knee_m, unit_cm=False)
+    print_stat("R_ank_above_knee", r_ank_above_knee_m, unit_cm=False)
+    print_stat("L_knee_above_hip", l_knee_above_hip_m, unit_cm=False)
+    print_stat("R_knee_above_hip", r_knee_above_hip_m, unit_cm=False)
+    print()
+
     # ── Confidence per keypoint ──────────────────────────────────────────
     print("Keypoint confidence (mean / p5 / p95 / fraction<0.3):")
     for name in schema.keypoints:
@@ -145,6 +193,10 @@ def main() -> int:
     s_lo, s_hi = args.shank
     a_max = args.asym_max
 
+    ka_lo, ka_hi = args.knee_angle
+    ank_tol = args.ank_above_knee_tol
+    knee_tol = args.knee_above_hip_tol
+
     failures = {
         "hip_width_oor":  (hw < hw_lo) | (hw > hw_hi),
         "L_thigh_oor":    (lt < t_lo) | (lt > t_hi),
@@ -153,14 +205,23 @@ def main() -> int:
         "R_shank_oor":    (rs < s_lo) | (rs > s_hi),
         "thigh_asym":     thigh_asym > a_max,
         "shank_asym":     shank_asym > a_max,
+        "L_ank_above_knee": l_ank_above_knee_m > ank_tol,
+        "R_ank_above_knee": r_ank_above_knee_m > ank_tol,
+        "L_knee_above_hip": l_knee_above_hip_m > knee_tol,
+        "R_knee_above_hip": r_knee_above_hip_m > knee_tol,
+        "L_knee_angle_oor": np.isfinite(lka) & ((lka < ka_lo) | (lka > ka_hi)),
+        "R_knee_angle_oor": np.isfinite(rka) & ((rka < ka_lo) | (rka > ka_hi)),
     }
     any_fail = np.zeros(N, dtype=bool)
 
     print("Per-check failure rates (gate below):")
-    print(f"  hip_width  : {hw_lo*100:.0f}–{hw_hi*100:.0f} cm")
-    print(f"  thigh      : {t_lo*100:.0f}–{t_hi*100:.0f} cm   (each side)")
-    print(f"  shank      : {s_lo*100:.0f}–{s_hi*100:.0f} cm   (each side)")
-    print(f"  asym_max   : {a_max:.2f}   (L/R ratio)")
+    print(f"  hip_width        : {hw_lo*100:.0f}–{hw_hi*100:.0f} cm")
+    print(f"  thigh            : {t_lo*100:.0f}–{t_hi*100:.0f} cm   (each side)")
+    print(f"  shank            : {s_lo*100:.0f}–{s_hi*100:.0f} cm   (each side)")
+    print(f"  asym_max         : {a_max:.2f}   (L/R ratio)")
+    print(f"  knee_angle       : {ka_lo:.0f}–{ka_hi:.0f}°")
+    print(f"  ank_above_knee   : reject if ankle sits > {ank_tol*100:.0f} cm above knee")
+    print(f"  knee_above_hip   : reject if knee  sits > {knee_tol*100:.0f} cm above hip")
     print()
     for k, v in failures.items():
         any_fail |= v

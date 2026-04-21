@@ -96,6 +96,17 @@ def parse_args() -> argparse.Namespace:
                     help="acceptable shank length in meters (default 0.20–0.55)")
     ap.add_argument("--sanity-asym", type=float, default=1.30,
                     help="max L/R asymmetry ratio (default 1.30 = 30%%)")
+    ap.add_argument("--sanity-knee-angle", nargs=2, type=float,
+                    metavar=("LO", "HI"), default=(30.0, 185.0),
+                    help="knee flexion angle range in degrees "
+                         "(default 30–185). 180° = straight leg.")
+    ap.add_argument("--sanity-ank-above-knee-tol", type=float, default=0.10,
+                    help="max metres ankle is allowed to rise ABOVE knee "
+                         "before rejecting (default 0.10 m)")
+    ap.add_argument("--sanity-knee-above-hip-tol", type=float, default=0.20,
+                    help="max metres knee is allowed to rise ABOVE hip "
+                         "before rejecting (default 0.20 m — allows moderate "
+                         "high-kick / swing phase)")
     return ap.parse_args()
 
 
@@ -150,6 +161,25 @@ def _resolve_index(schema, name: str) -> Optional[int]:
         return None
 
 
+def _knee_angle_deg(hip: np.ndarray, knee: np.ndarray, ankle: np.ndarray) -> Optional[float]:
+    """Interior angle at the knee (degrees).
+
+    Convention: 180° = fully straight leg (hip–knee–ankle collinear),
+    90° = right angle, smaller values = more flexion.  Walking range is
+    typically 120°–180°; deep squat can reach ~30°.  Anything outside
+    [30°, 185°] is physiologically impossible and indicates a bad keypoint.
+    """
+    v1 = hip - knee
+    v2 = ankle - knee
+    n1 = float(np.linalg.norm(v1))
+    n2 = float(np.linalg.norm(v2))
+    if n1 < 1e-3 or n2 < 1e-3:
+        return None
+    cos_a = float(np.dot(v1, v2)) / (n1 * n2)
+    cos_a = max(-1.0, min(1.0, cos_a))
+    return float(np.degrees(np.arccos(cos_a)))
+
+
 def _check_anatomy(
     kpts_3d: np.ndarray,
     idx_map: dict,
@@ -157,17 +187,23 @@ def _check_anatomy(
     thigh_bounds: Tuple[float, float],
     shank_bounds: Tuple[float, float],
     asym_max: float,
+    knee_angle_bounds: Tuple[float, float] = (30.0, 185.0),
+    ankle_above_knee_tol: float = 0.10,
+    knee_above_hip_tol: float = 0.20,
 ) -> Tuple[bool, List[str]]:
     """Biomechanical sanity gate.
 
-    Checks whether the 3-D keypoint configuration is anatomically plausible.
-    YOLO pose models occasionally produce impossible poses (self-occlusion,
-    L/R swap, treadmill-belt confusion, motion blur). These frames are
-    indistinguishable from good ones via confidence alone, so we use geometric
-    priors as a second line of defence.
+    Three families of checks, all read-only (no pose correction — stays
+    within CLAUDE.md's ban on keypoint-feedback loops):
 
-    All checks are read-only: we flag the frame, never correct it — consistent
-    with CLAUDE.md's ban on keypoint-feedback loops.
+      1. **Bone length**   — each segment must fit adult range.
+      2. **L/R asymmetry** — left and right equivalents must match within
+         ``asym_max`` ratio.
+      3. **Anatomical orientation** — ankles must be below knees and knees
+         not dramatically above hips; knee flexion angle must fall in a
+         physiologically possible range. Catches hyperextension / depth
+         mis-sampling that fakes an impossible pose while bone lengths
+         still fit individually.
 
     Returns (is_valid, list_of_failure_reasons).
     """
@@ -180,6 +216,7 @@ def _check_anatomy(
             return None
         return float(np.linalg.norm(kpts_3d[ia] - kpts_3d[ib]))
 
+    # ── Bone lengths ──────────────────────────────────────────────────────
     hw = dist_mm("left_hip", "right_hip")
     if hw is not None:
         lo, hi = hip_bounds
@@ -201,6 +238,7 @@ def _check_anatomy(
         if val is not None and not (s_lo <= val <= s_hi):
             reasons.append(f"{name}={val*100:.0f}cm")
 
+    # ── Bilateral asymmetry ───────────────────────────────────────────────
     if l_thigh is not None and r_thigh is not None and min(l_thigh, r_thigh) > 1e-3:
         asym_t = max(l_thigh, r_thigh) / min(l_thigh, r_thigh)
         if asym_t > asym_max:
@@ -210,6 +248,35 @@ def _check_anatomy(
         asym_s = max(l_shank, r_shank) / min(l_shank, r_shank)
         if asym_s > asym_max:
             reasons.append(f"SA={asym_s:.2f}")
+
+    # ── Anatomical orientation (Y+ = down) ────────────────────────────────
+    # World Y increases downward, so a lower point has LARGER Y. For a
+    # standing / walking person ankle_y > knee_y > hip_y. Depth-sampling
+    # errors and keypoint swaps frequently invert this.
+    ka_min, ka_max = knee_angle_bounds
+    for side in ("left", "right"):
+        ih = idx_map.get(f"{side}_hip")
+        ik = idx_map.get(f"{side}_knee")
+        ia = idx_map.get(f"{side}_ankle")
+        if ih is None or ik is None or ia is None:
+            continue
+        hip_pt = kpts_3d[ih]
+        knee_pt = kpts_3d[ik]
+        ankle_pt = kpts_3d[ia]
+
+        # Ankle must be below knee (allow ``ankle_above_knee_tol`` slack for
+        # high-kick / swing-phase frames).
+        if ankle_pt[1] < knee_pt[1] - ankle_above_knee_tol:
+            reasons.append(f"{side[0].upper()}_ank^knee")
+
+        # Knee must not be far above hip. Brief high lift allowed.
+        if knee_pt[1] < hip_pt[1] - knee_above_hip_tol:
+            reasons.append(f"{side[0].upper()}_knee^hip")
+
+        # Knee flexion angle in physiological range.
+        ang = _knee_angle_deg(hip_pt, knee_pt, ankle_pt)
+        if ang is not None and not (ka_min <= ang <= ka_max):
+            reasons.append(f"{side[0].upper()}_kang={ang:.0f}")
 
     return (len(reasons) == 0, reasons)
 
@@ -320,6 +387,9 @@ def main() -> int:
                         tuple(args.sanity_thigh),
                         tuple(args.sanity_shank),
                         args.sanity_asym,
+                        knee_angle_bounds=tuple(args.sanity_knee_angle),
+                        ankle_above_knee_tol=args.sanity_ank_above_knee_tol,
+                        knee_above_hip_tol=args.sanity_knee_above_hip_tol,
                     )
                     if not sane:
                         sanity_rejects += 1
