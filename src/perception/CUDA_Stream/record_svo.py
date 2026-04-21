@@ -31,6 +31,55 @@ except ImportError:
     sys.exit(2)
 
 
+def verify_imu_stream(svo_path: Path, max_tries: int = 10) -> bool:
+    """Re-open the SVO and confirm that IMU samples are present.
+
+    Without a valid IMU stream, the R-matrix warmup in zed_gpu_bridge can't
+    compute the world-frame rotation — sagittal plane would fall back to
+    camera frame and the paper's Method-B claim would be lost.
+
+    Returns True iff quaternion norm ≈ 1 and |linear accel| ≈ g.
+    """
+    init = sl.InitParameters()
+    init.set_from_svo_file(str(svo_path))
+    init.coordinate_units = sl.UNIT.METER
+
+    cam = sl.Camera()
+    if cam.open(init) != sl.ERROR_CODE.SUCCESS:
+        print("[verify] cannot re-open SVO for IMU check", file=sys.stderr)
+        return False
+
+    rt = sl.RuntimeParameters()
+    sensors = sl.SensorsData()
+    try:
+        for _ in range(max_tries):
+            if cam.grab(rt) != sl.ERROR_CODE.SUCCESS:
+                break
+            if cam.get_sensors_data(sensors, sl.TIME_REFERENCE.IMAGE) != sl.ERROR_CODE.SUCCESS:
+                continue
+            imu = sensors.get_imu_data()
+            q = imu.get_pose().get_orientation().get()     # [x, y, z, w]
+            a = imu.get_linear_acceleration()              # [ax, ay, az] m/s²
+            q_norm = float((q[0]**2 + q[1]**2 + q[2]**2 + q[3]**2) ** 0.5)
+            a_mag  = float((a[0]**2 + a[1]**2 + a[2]**2) ** 0.5)
+            if q_norm > 0.1:
+                ok_q = abs(q_norm - 1.0) < 1e-2
+                ok_a = 8.0 < a_mag < 11.0
+                status = "OK" if (ok_q and ok_a) else "WEAK"
+                print(f"[verify] IMU {status}")
+                print(f"[verify]   quaternion norm = {q_norm:.4f}   (expect ≈ 1.0)")
+                print(f"[verify]   |accel|         = {a_mag:.2f} m/s²   (expect ≈ 9.81)")
+                print(f"[verify]   quaternion (x,y,z,w) = "
+                      f"({q[0]:.3f}, {q[1]:.3f}, {q[2]:.3f}, {q[3]:.3f})")
+                return ok_q and ok_a
+        print("[verify] WARNING: no IMU data returned after "
+              f"{max_tries} grabs — R-matrix warmup will fail.",
+              file=sys.stderr)
+        return False
+    finally:
+        cam.close()
+
+
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -136,6 +185,17 @@ def main() -> int:
         print(f"[rec]   avg fps : {avg_fps:.1f}")
         print(f"[rec]   size    : {size_mb:.1f} MB")
         print(f"[rec]   file    : {out_path}")
+
+    # IMU verification — fail the whole script if SVO has no usable IMU,
+    # since downstream R-matrix warmup would silently fall back to camera
+    # frame.
+    if out_path.exists() and out_path.stat().st_size > 1024:
+        print("[verify] re-opening SVO to check IMU stream ...")
+        if verify_imu_stream(out_path):
+            return 0
+        print("[verify] FAILED — check ZED firmware / SDK version.",
+              file=sys.stderr)
+        return 5
     return 0
 
 
