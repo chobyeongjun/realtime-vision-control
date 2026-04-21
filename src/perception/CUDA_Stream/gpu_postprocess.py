@@ -137,11 +137,26 @@ class GpuPostprocessor:
         # exponential moving average on the *3D output only* (never on
         # 2D keypoints — that path corrupts depth lookup). Alpha=0.7
         # means new=0.3*current + 0.7*prev: fast enough for walking
-        # (5 Hz gait band) but cuts depth jitter visibly. Only applied
-        # to valid frames; reset on each invalid burst so a stale prev
-        # doesn't haunt a recovered detection.
+        # (5 Hz gait band) but cuts depth jitter visibly.
         self.ema_alpha: float = 0.7   # weight on PREVIOUS sample
         self._ema_prev: Optional[torch.Tensor] = None  # (K, 3) on GPU
+
+        # Sticky / hold-last-good state — when detection fails for a
+        # short burst (occlusion, motion blur, single missed frame), we
+        # keep emitting the LAST GOOD pose with valid=True so the
+        # consumer (sagittal viewer + C++ control) sees a continuous
+        # signal instead of zeros + flicker.
+        # After max_sticky frames we give up and emit a true valid=False
+        # so safety still kicks in if the subject is genuinely gone.
+        # Default 5 frames @ ~85Hz ≈ 60ms hold — well inside C++ inner
+        # control horizon and the AK60 mechanical bandwidth.
+        self.max_sticky_frames: int = 5
+        self._sticky_kpts_3d: Optional[torch.Tensor] = None
+        self._sticky_kpts_2d: Optional[torch.Tensor] = None
+        self._sticky_kpt_conf: Optional[torch.Tensor] = None
+        self._sticky_box_conf: float = 0.0
+        self._sticky_dir: float = 0.0
+        self._sticky_age: int = 0
 
     @classmethod
     def from_schema_name(cls, name: str, **kwargs) -> "GpuPostprocessor":
@@ -220,43 +235,80 @@ class GpuPostprocessor:
 
             # Branch on box_conf (CPU side) — only reached after one sync
             if box_conf < self.conf_threshold:
-                # Reset EMA so a recovered detection doesn't blend with
-                # stale 'last good' from minutes ago.
-                self._ema_prev = None
-                zeros2 = torch.zeros((K, 2), device=self.device)
-                zeros3 = torch.zeros((K, 3), device=self.device)
-                zerosc = torch.zeros((K,), device=self.device)
-                return PoseResult(
-                    kpts_2d_px=zeros2, kpts_3d_m=zeros3, kpt_conf=zerosc,
-                    box_conf=box_conf, valid=False, depth_invalid_ratio=1.0,
-                )
+                return self._maybe_sticky(box_conf)
 
             occluded = num_low_conf >= self.occluded_count
-            if self._filter is not None and not occluded:
+            if occluded:
+                # Don't clobber EMA / sticky on a transient occlusion —
+                # _maybe_sticky decides whether to hold or fail-stop.
+                return self._maybe_sticky(box_conf)
+
+            if self._filter is not None:
                 kpts_3d = self._filter(kpts_3d, ts_s)
 
-            # 3D EMA — applied AFTER occlusion check so a fully-occluded
-            # frame doesn't pollute the running average. Skip per-joint
-            # blend on freshly-recovered joints (prev=None) — bootstrap
-            # with current sample.
-            if not occluded:
-                if self._ema_prev is None:
-                    self._ema_prev = kpts_3d.clone()
-                else:
-                    kpts_3d = (
-                        (1.0 - self.ema_alpha) * kpts_3d
-                        + self.ema_alpha * self._ema_prev
-                    )
-                    self._ema_prev = kpts_3d.clone()
+            # 3D EMA — applied AFTER occlusion / conf gate so a bad frame
+            # doesn't pollute the running average. Bootstrap with current
+            # sample if there's no prev (first valid frame after reset).
+            if self._ema_prev is None:
+                self._ema_prev = kpts_3d.clone()
+            else:
+                kpts_3d = (
+                    (1.0 - self.ema_alpha) * kpts_3d
+                    + self.ema_alpha * self._ema_prev
+                )
+                self._ema_prev = kpts_3d.clone()
+
+            # Update sticky state — this is the new "last good" anchor.
+            self._sticky_kpts_3d = kpts_3d.clone()
+            self._sticky_kpts_2d = xy_src.clone()
+            self._sticky_kpt_conf = kp_conf.clone()
+            self._sticky_box_conf = box_conf
+            self._sticky_dir = invalid_ratio
+            self._sticky_age = 0
 
             return PoseResult(
                 kpts_2d_px=xy_src,
                 kpts_3d_m=kpts_3d,
                 kpt_conf=kp_conf,
                 box_conf=box_conf,
-                valid=not occluded,
+                valid=True,
                 depth_invalid_ratio=invalid_ratio,
             )
+
+    # ------------------------------------------------------------------
+    def _maybe_sticky(self, box_conf: float) -> PoseResult:
+        """Detection failed (low conf or too many occluded joints).
+
+        If we still have a recent 'last good' pose within max_sticky_frames,
+        emit it as VALID so the consumer sees continuity. Otherwise emit
+        a real INVALID so safety (C++ watchdog → pretension) kicks in.
+        """
+        K = self.K
+        if (self._sticky_kpts_3d is not None
+                and self._sticky_age < self.max_sticky_frames):
+            self._sticky_age += 1
+            return PoseResult(
+                kpts_2d_px=self._sticky_kpts_2d,
+                kpts_3d_m=self._sticky_kpts_3d,
+                kpt_conf=self._sticky_kpt_conf,
+                box_conf=self._sticky_box_conf,
+                valid=True,
+                depth_invalid_ratio=self._sticky_dir,
+            )
+        # Sticky budget exhausted — give up and reset so a future
+        # recovered detection doesn't blend with the abandoned pose.
+        self._ema_prev = None
+        self._sticky_kpts_3d = None
+        self._sticky_kpts_2d = None
+        self._sticky_kpt_conf = None
+        self._sticky_age = 0
+        zeros2 = torch.zeros((K, 2), device=self.device)
+        zeros3 = torch.zeros((K, 3), device=self.device)
+        zerosc = torch.zeros((K,), device=self.device)
+        return PoseResult(
+            kpts_2d_px=zeros2, kpts_3d_m=zeros3, kpt_conf=zerosc,
+            box_conf=box_conf, valid=False, depth_invalid_ratio=1.0,
+        )
 
     # ------------------------------------------------------------------
     def _lift_to_3d_v(
