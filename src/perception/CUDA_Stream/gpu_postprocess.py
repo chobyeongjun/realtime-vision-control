@@ -132,6 +132,17 @@ class GpuPostprocessor:
                 (self.K, 3), device=self.device, **fp
             )
 
+        # Simple 3D EMA — different from OneEuro (which we cannot use,
+        # see skiro-learnings: 0/6 joints failure on lowlimb6). Vanilla
+        # exponential moving average on the *3D output only* (never on
+        # 2D keypoints — that path corrupts depth lookup). Alpha=0.7
+        # means new=0.3*current + 0.7*prev: fast enough for walking
+        # (5 Hz gait band) but cuts depth jitter visibly. Only applied
+        # to valid frames; reset on each invalid burst so a stale prev
+        # doesn't haunt a recovered detection.
+        self.ema_alpha: float = 0.7   # weight on PREVIOUS sample
+        self._ema_prev: Optional[torch.Tensor] = None  # (K, 3) on GPU
+
     @classmethod
     def from_schema_name(cls, name: str, **kwargs) -> "GpuPostprocessor":
         return cls(schema=get_schema(name), **kwargs)
@@ -209,6 +220,9 @@ class GpuPostprocessor:
 
             # Branch on box_conf (CPU side) — only reached after one sync
             if box_conf < self.conf_threshold:
+                # Reset EMA so a recovered detection doesn't blend with
+                # stale 'last good' from minutes ago.
+                self._ema_prev = None
                 zeros2 = torch.zeros((K, 2), device=self.device)
                 zeros3 = torch.zeros((K, 3), device=self.device)
                 zerosc = torch.zeros((K,), device=self.device)
@@ -220,6 +234,20 @@ class GpuPostprocessor:
             occluded = num_low_conf >= self.occluded_count
             if self._filter is not None and not occluded:
                 kpts_3d = self._filter(kpts_3d, ts_s)
+
+            # 3D EMA — applied AFTER occlusion check so a fully-occluded
+            # frame doesn't pollute the running average. Skip per-joint
+            # blend on freshly-recovered joints (prev=None) — bootstrap
+            # with current sample.
+            if not occluded:
+                if self._ema_prev is None:
+                    self._ema_prev = kpts_3d.clone()
+                else:
+                    kpts_3d = (
+                        (1.0 - self.ema_alpha) * kpts_3d
+                        + self.ema_alpha * self._ema_prev
+                    )
+                    self._ema_prev = kpts_3d.clone()
 
             return PoseResult(
                 kpts_2d_px=xy_src,
