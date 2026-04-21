@@ -208,13 +208,24 @@ class TRTRunner:
                 f"got shape={tensor.shape} dtype={tensor.dtype}"
             )
         new_ptr = int(tensor.data_ptr())
-        cached = getattr(self, "_bound_ptrs", None)
-        if cached is None:
-            cached = {}
-            self._bound_ptrs = cached
-        if cached.get(name) != new_ptr:
+        cached_ptrs = getattr(self, "_bound_ptrs", None)
+        cached_refs = getattr(self, "_bound_tensor_refs", None)
+        if cached_ptrs is None:
+            cached_ptrs = {}
+            cached_refs = {}
+            self._bound_ptrs = cached_ptrs
+            self._bound_tensor_refs = cached_refs
+        # CRITICAL: keep a strong reference to the tensor whose pointer
+        # we cached. Without this, the caller's tensor can be GC'd, the
+        # underlying CUDA buffer freed, and TRT will read freed memory
+        # on the next inference → cudaErrorIllegalAddress on shutdown.
+        # If the SAME ptr value gets re-used by a new allocation we'd
+        # silently keep the stale binding — so we also re-set on tensor
+        # identity change (cached_refs.get(name) is not tensor).
+        if cached_ptrs.get(name) != new_ptr or cached_refs.get(name) is not tensor:
             self.context.set_tensor_address(name, new_ptr)
-            cached[name] = new_ptr
+            cached_ptrs[name] = new_ptr
+            cached_refs[name] = tensor
 
     def get_output(self, name: str) -> torch.Tensor:
         return self.bindings[name].tensor

@@ -60,7 +60,14 @@ class StreamManager:
             raise RuntimeError("CUDA not available — cannot build StreamManager")
         self.device = device or torch.device("cuda:0")
 
-        high = set(high_priority_stages or ["infer"])
+        # All stages high-priority on TRT 10.x.
+        # On TRT 8.x (4/18 baseline) priority asymmetry was harmless because
+        # CUDA event timing showed the actual GPU work ~1ms; TRT 10.x's
+        # heavier per-launch overhead caused low-prio streams (post) to
+        # wait for infer to fully release SMs (measured post=7ms incl wait).
+        # Equal priority lets the SM scheduler interleave overlapping work
+        # across frames the way the 3-stage pipeline was designed to.
+        high = set(high_priority_stages or list(STAGE_NAMES))
         lo_prio, hi_prio = torch.cuda.Stream.priority_range()
         self.streams: Dict[str, StreamBundle] = {}
         for name in STAGE_NAMES:
