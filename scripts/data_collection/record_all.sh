@@ -24,24 +24,24 @@ run() {
 }
 
 # ── 추리닝 ────────────────────────────────────────
-run "walk_sweats_2kmh"
-run "walk_sweats_4kmh"
-run "walk_sweats_7kmh"
+run "walk_sweats_3kmh"
+run "walk_sweats_4p5kmh"
+run "walk_sweats_6kmh"
 
 # ── 쫄쫄이 ────────────────────────────────────────
-run "walk_tight_2kmh"
-run "walk_tight_4kmh"
-run "walk_tight_7kmh"
+run "walk_tight_3kmh"
+run "walk_tight_4p5kmh"
+run "walk_tight_6kmh"
 
 # ── 헐렁한 반바지 ──────────────────────────────────
-run "walk_shorts_2kmh"
-run "walk_shorts_4kmh"
-run "walk_shorts_7kmh"
+run "walk_shorts_3kmh"
+run "walk_shorts_4p5kmh"
+run "walk_shorts_6kmh"
 
 # ── Exosuit ───────────────────────────────────────
-run "walk_exosuit_2kmh"
-run "walk_exosuit_4kmh"
-run "walk_exosuit_7kmh"
+run "walk_exosuit_3kmh"
+run "walk_exosuit_4p5kmh"
+run "walk_exosuit_6kmh"
 
 echo ""
 echo "모든 녹화 완료 → ${OUTDIR}/"
